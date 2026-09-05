@@ -49,7 +49,7 @@ if hasattr(sys.stdout, "reconfigure"):
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8519590900:AAG8kn_xe0obnB1cvEId-CzTjR7GFSMYrtU")
-DEFAULT_OTP_DOCTOR_KEY = os.getenv("OTPDOCTOR_API_KEY", "qlxv6qte5xtqms1e18xpwrz8f1c0zbvv")
+DEFAULT_OTP_DOCTOR_KEY = os.getenv("OTPDOCTOR_API_KEY", "").strip()
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "8282846997").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -369,6 +369,7 @@ async def otpd_get_sms(client: httpx.AsyncClient, api_key: str, act_id: str) -> 
 # ─── Web Registration Checker ─────────────────────────────────────────────────
 async def check_meesho_reg(client: httpx.AsyncClient, phone: str) -> dict:
     payload = {"number": phone}
+    last_err = ""
     for url, hdr in [(CHECKER_PRIMARY, CHECKER_HEADERS_1), (CHECKER_FALLBACK, CHECKER_HEADERS_2)]:
         try:
             r = await client.post(url, json=payload, headers=hdr, timeout=10)
@@ -380,10 +381,16 @@ async def check_meesho_reg(client: httpx.AsyncClient, phone: str) -> dict:
                         "registered": res.get("registered", False),
                         "fresh": res.get("fresh", False),
                         "ok": True,
+                        "error": None,
                     }
-        except Exception:
+                elif d.get("error") or d.get("message"):
+                    last_err = d.get("error") or d.get("message")
+            else:
+                last_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)
             continue
-    return {"registered": None, "fresh": None, "ok": False}
+    return {"registered": None, "fresh": None, "ok": False, "error": last_err or "Both checker endpoints unreachable"}
 
 
 # ─── Send OTP & Verify (Crowstack + Fallback) ──────────────────────────────────
@@ -622,7 +629,19 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
         return
 
     cfg = get_user_config(chat_id)
-    api_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
+    api_key = (cfg.get("api_key") or "").strip()
+    if not api_key:
+        state["hunting"] = False
+        await send_tg_message(
+            client,
+            chat_id,
+            "⚠️ <b>OTP Doctor API Key Required!</b>\n\n"
+            "Aapne abhi tak apna OTP Doctor API Key set nahi kiya hai.\n"
+            "👉 Kripya <b>🔑 Set API Key</b> button dabayein ya <code>/setkey &lt;your_key&gt;</code> bhejein.",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        return
+
     servers = cfg.get("selected_servers", ["5841"])
     if not servers:
         servers = ["5841"]
@@ -717,6 +736,25 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
         if not chk["ok"]:
             await asyncio.sleep(2)
             chk = await check_meesho_reg(client, phone)
+
+        # 🚨 Both registration checker APIs failed / down!
+        if not chk["ok"]:
+            err_detail = chk.get("error", "Both checker endpoints down")
+            print(f"[{time.strftime('%H:%M:%S')}] 🚨 Web Checker APIs failed: {err_detail}. Alerting user...")
+            await otpd_cancel(client, api_key, act_id)
+            state["active_id"] = None
+            await send_tg_message(
+                client,
+                chat_id,
+                f"🚨 <b>ALERT: Web Registration Checker Down!</b>\n\n"
+                f"⚠️ Dono checker APIs (Primary & Fallback) respond nahi kar rahi hain:\n"
+                f"<code>Error: {err_detail}</code>\n\n"
+                f"🛡️ Aapka balance safe rakhne ke liye number <code>+91{phone}</code> cancel kar diya gaya hai taaki koi loss na ho.\n\n"
+                f"Hunting temporarily pause kar di gayi hai. Checker live hone par dobara <b>🚀 Start Hunt</b> karein.",
+                reply_markup=MAIN_MENU_KEYBOARD,
+            )
+            state["hunting"] = False
+            break
 
         is_reg = chk.get("registered")
 
@@ -884,6 +922,19 @@ async def handle_manual_number_check(client: httpx.AsyncClient, chat_id: int | s
     if not chk["ok"]:
         await asyncio.sleep(1)
         chk = await check_meesho_reg(client, phone)
+
+    if not chk["ok"]:
+        err_detail = chk.get("error", "Both checker endpoints unreachable")
+        await send_tg_message(
+            client,
+            chat_id,
+            f"🚨 <b>ALERT: Web Registration Checker Down!</b>\n\n"
+            f"⚠️ Dono checker APIs kaam nahi kar rahi hain:\n"
+            f"<code>Error: {err_detail}</code>\n\n"
+            f"Is vajah se number verify nahi ho sakta. Kripya thodi der baad try karein.",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        return
 
     confirm_markup = {
         "keyboard": [
@@ -1068,8 +1119,8 @@ async def bot_loop():
                     # ── /start or /help ──
                     if text.startswith("/start") or text.startswith("/help"):
                         cur_servers = cfg.get("selected_servers", ["5841"])
-                        cur_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
-                        masked_key = cur_key[:4] + "..." + cur_key[-4:] if len(cur_key) >= 8 else "Not set"
+                        cur_key = (cfg.get("api_key") or "").strip()
+                        masked_key = cur_key[:4] + "..." + cur_key[-4:] if len(cur_key) >= 8 else "❌ Not set (Click 🔑 Set API Key)"
                         menu_text = (
                             f"👋 <b>Meesho Multi-Server Hunter Bot</b>\n\n"
                             f"⚙️ <b>Current Settings:</b>\n"
@@ -1246,8 +1297,8 @@ async def bot_loop():
 
                     # ── 📊 Stats ──
                     elif text.startswith("/stats") or text == "📊 Stats":
-                        api_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
-                        b = await otpd_balance(client, api_key)
+                        api_key = (cfg.get("api_key") or "").strip()
+                        b = await otpd_balance(client, api_key) if api_key else "Not set"
                         sel_servers = cfg.get("selected_servers", ["5841"])
                         if state and state.get("hunting"):
                             runtime_mins = int((time.time() - state.get("start_time", time.time())) // 60)
@@ -1275,7 +1326,15 @@ async def bot_loop():
 
                     # ── 💰 Balance ──
                     elif text.startswith("/balance") or text == "💰 Balance":
-                        api_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
+                        api_key = (cfg.get("api_key") or "").strip()
+                        if not api_key:
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "⚠️ <b>API Key Set Nahi Hai!</b>\nKripya pehle <b>🔑 Set API Key</b> button dabayein ya <code>/setkey &lt;your_key&gt;</code> bhejein.",
+                                reply_markup=MAIN_MENU_KEYBOARD,
+                            )
+                            continue
                         b = await otpd_balance(client, api_key)
                         masked_key = api_key[:4] + "..." + api_key[-4:] if len(api_key) >= 8 else api_key
                         await send_tg_message(
