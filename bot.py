@@ -1,0 +1,1313 @@
+#!/usr/bin/env python3
+"""
+Meesho Multi-Server Hunter & Account Creator Bot
+=================================================
+Key Features:
+  1. Custom API Key per user (/setkey or '🔑 Set API Key')
+  2. Select up to 2 servers simultaneously (/servers or '⚙️ Select Servers')
+  3. Continuous Dual-Server Hunting:
+     - Alternates buying between selected servers
+     - Checks registration via Web Checker API
+     - Auto-cancels registered numbers for refund
+     - If fresh: sends OTP via Crowstack API, auto-fetches SMS from OTP Doctor,
+       verifies login, and exports account JSON directly to Telegram!
+  4. Manual Number Check ('📱 Check My Number'):
+     - Checks registration status
+     - If registered: prompts option to send OTP anyway
+     - If fresh: sends OTP, verifies, and exports JSON
+  5. Per-user settings saved persistently in user_configs.json
+"""
+
+import os
+import sys
+import time
+import re
+import json
+import uuid
+import random
+import secrets
+import base64
+import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import httpx
+from dotenv import load_dotenv
+
+# Cryptography for fallback Meesho login
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+# Windows console encoding fix
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+# ─── Load Environment ─────────────────────────────────────────────────────────
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8519590900:AAG8kn_xe0obnB1cvEId-CzTjR7GFSMYrtU")
+DEFAULT_OTP_DOCTOR_KEY = os.getenv("OTPDOCTOR_API_KEY", "qlxv6qte5xtqms1e18xpwrz8f1c0zbvv")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "8282846997").strip()
+PORT = int(os.getenv("PORT", "10000"))
+
+OTP_DOCTOR_BASE = "https://www.otpdoctor.in/stubs/handler_api.php"
+OTP_DOCTOR_WEB_TOKEN = "6874841e41592b17f19761540921b8b4d200920078bff7d9cc8d843d7c32"
+
+# ─── Crowstack Signup APIs (Primary OTP Send & Verify) ────────────────────────
+CROWSTACK_BASE = "https://meesho.crowstack.tech/api/signup"
+CROWSTACK_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+    "Content-Type": "application/json",
+    "Origin": "https://meesho.crowstack.tech",
+    "Referer": "https://meesho.crowstack.tech/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "X-Tg-Init-Data": (
+        "query_id=AAEVN7JtAwAAABU3sm2aUBhR&user=%7B%22id%22%3A8282846997%2C"
+        "%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C"
+        "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
+        "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
+        "%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D"
+        "&auth_date=1788610401&signature=k4mneTgLJIWH33XG-nBIs8kE-cNIsE70RKNacz3NZc80zbLpoq0BRRoTuEDZNCMX6Dy1p48Kxu6Jw_CajHMRAw"
+        "&hash=54fb10c6a40b2b5fd9002abcc44d5871328080319f4f168796a053e7599ffcf5"
+    ),
+    "sec-ch-ua": '"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+}
+
+# ─── Web Registration Checker APIs ────────────────────────────────────────────
+CHECKER_PRIMARY = "https://pricetrackerpro.fojadomain.fun/api/check"
+CHECKER_FALLBACK = "https://promeesho.eu.cc/api/check"
+
+CHECKER_HEADERS_1 = {
+    "accept": "*/*",
+    "content-type": "application/json",
+    "origin": "https://pricetrackerpro.fojadomain.fun",
+    "referer": "https://pricetrackerpro.fojadomain.fun/",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "x-token": "8282846997.68a9acd4037ffb4c",
+}
+
+CHECKER_HEADERS_2 = {
+    "accept": "*/*",
+    "content-type": "application/json",
+    "origin": "https://promeesho.eu.cc",
+    "referer": "https://promeesho.eu.cc/",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "x-token": "8282846997.023e330b21f757ae",
+}
+
+# ─── Fallback Direct Meesho / OTPLESS Constants ────────────────────────────────
+MEESHO_API_BASE = "https://prod.meeshoapi.com/api"
+MEESHO_AUTH = "32c4d8137cn9eb493a1921f203173080"
+MEESHO_RSA_PUBKEY_B64 = (
+    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAslmrLKGRzVnAtii3o89yI33FXZoRfBJ"
+    "V89PaCTp9Mxu7FgAaAOtaOnB2xWGG2a6Rz6zRzKPilRdAsm5oBW8mm8Uzvt7mbf7c7pjfBrjNdnKji"
+    "/9/zM3fpjh364/GwG3OpyYngD49i09ySljA7Elh97Pp+QJH2z25Xv2eRSHJPizgQ8TE1bJkP9fd9J"
+    "cfpGFyeEJX1bUIbgRlfED2TpJKGeaEfZ9no5+i/rgCaIRO9t86UqgeVJyCyJLnUkrU/ARPj9q/Aij"
+    "JV9kvyPT137UQLO+Cl6nZYOglqGcPnRbGiW6WM7imkSxR2XBn6N4ojf49nJOwnN826hkdH5JaPJ1p"
+    "AQIDAQAB"
+)
+OTPLESS_APP_ID = "XN07RN1IQC548C9YK5I4"
+OTPLESS_PACKAGE = "com.meesho.supply"
+OTPLESS_LOGIN_URI = "otpless.xn07rn1iqc548c9yk5i4://otpless"
+OTPLESS_OTP_HASH = "oBcOM6bXKNc"
+OTPLESS_APP_SIG = "oBcOM6bXKNcqouiPFcR1ur60Z6myTuVIDNSNWuKOlzU"
+OTPLESS_UA = "okhttp/4.9.0"
+OTPLESS_ORIGIN = "https://otpless.com"
+
+DEVICE_INFO_OTPLESS = {
+    "platform": "android",
+    "vendor": "motorola",
+    "browser": "",
+    "connection": "",
+    "language": "en-IN",
+    "cookieEnabled": "",
+    "screenWidth": 1080,
+    "screenHeight": 2225,
+    "userAgent": "Dalvik/2.1.0 (Linux; U; Android 12; moto g(60) Build/S2RI32.32-20-9-9-2) otplesssdk",
+    "timezoneOffset": 330,
+    "cpuArchitecture": "aarch64",
+}
+KEY_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+"
+
+# ─── Default Known Meesho Servers ─────────────────────────────────────────────
+KNOWN_SERVERS = {
+    "5841": {"id": "5841", "name": "Server 5841", "price": "₹12"},
+    "2795": {"id": "2795", "name": "Server 2795", "price": "₹10"},
+    "2831": {"id": "2831", "name": "Server 2831", "price": "₹10"},
+    "3012": {"id": "3012", "name": "Server 3012", "price": "₹11"},
+}
+
+USER_CONFIGS_FILE = "user_configs.json"
+ACTIVE_TASKS = {}
+
+
+# ─── Persistent User Settings Storage ─────────────────────────────────────────
+def load_all_configs() -> dict:
+    if os.path.exists(USER_CONFIGS_FILE):
+        try:
+            with open(USER_CONFIGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_all_configs(configs: dict):
+    try:
+        with open(USER_CONFIGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(configs, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Config Save Error] {e}")
+
+
+def get_user_config(chat_id: int | str) -> dict:
+    configs = load_all_configs()
+    cid = str(chat_id)
+    if cid not in configs:
+        configs[cid] = {
+            "api_key": DEFAULT_OTP_DOCTOR_KEY,
+            "selected_servers": ["5841"],
+            "custom_servers": {},
+        }
+        save_all_configs(configs)
+    return configs[cid]
+
+
+def update_user_config(chat_id: int | str, updates: dict):
+    configs = load_all_configs()
+    cid = str(chat_id)
+    cur = configs.get(cid, {
+        "api_key": DEFAULT_OTP_DOCTOR_KEY,
+        "selected_servers": ["5841"],
+        "custom_servers": {},
+    })
+    cur.update(updates)
+    configs[cid] = cur
+    save_all_configs(configs)
+
+
+# ─── Health Server for Render / Cloud ─────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok","service":"Meesho Multi-Server Hunter Bot"}')
+
+    def log_message(self, format, *args):
+        pass
+
+
+def start_health_server():
+    try:
+        server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+        print(f"[Health Server] Listening on port {PORT}...")
+        server.serve_forever()
+    except Exception as e:
+        print(f"[Health Server Error] {e}")
+
+
+# ─── Helper Functions ─────────────────────────────────────────────────────────
+def clean_phone(raw: str) -> str:
+    d = re.sub(r"\D", "", str(raw))
+    if len(d) == 12 and d.startswith("91"):
+        return d[2:]
+    return d[-10:] if len(d) >= 10 else d
+
+
+def parse_wait_time(msg: str) -> int:
+    total = 0
+    m = re.search(r"(\d+)\s*minute", msg)
+    if m:
+        total += int(m.group(1)) * 60
+    s = re.search(r"(\d+)\s*second", msg)
+    if s:
+        total += int(s.group(1))
+    return total if total > 0 else 120
+
+
+def _ts_id():
+    return f"{uuid.uuid4()}-{int(time.time() * 1000)}"
+
+
+def gen_key() -> str:
+    return "".join(secrets.choice(KEY_CHARSET) for _ in range(16))
+
+
+def aes_gcm_encrypt(plaintext: bytes, key: str) -> str:
+    iv = os.urandom(12)
+    ct = AESGCM(key[:16].encode("utf-8")).encrypt(iv, plaintext, None)
+    return base64.b64encode(iv + ct).decode("ascii")
+
+
+def rsa_encrypt(data: str) -> str:
+    pub = serialization.load_der_public_key(base64.b64decode(MEESHO_RSA_PUBKEY_B64))
+    return base64.b64encode(pub.encrypt(data.encode("utf-8"), rsa_padding.PKCS1v15())).decode("ascii")
+
+
+def mk_device():
+    return {
+        "brand": "motorola",
+        "manufacturer": "motorola",
+        "model": "moto g(60)",
+        "os_version": "12",
+        "gaid": str(uuid.uuid4()),
+        "android_id": uuid.uuid4().hex[:16],
+        "instance_id": str(uuid.uuid4()),
+        "session_id": str(uuid.uuid4()),
+        "user_agent": "Dalvik/2.1.0 (Linux; U; Android 12; moto g(60) Build/) Cronet/137.0.7100.61",
+    }
+
+
+# ─── Telegram Bot API Helpers ─────────────────────────────────────────────────
+async def send_tg_message(client: httpx.AsyncClient, chat_id: int | str, text: str, reply_markup=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        r = await client.post(url, json=payload, timeout=15)
+        return r.json()
+    except Exception as e:
+        print(f"[TG Error] send_tg_message: {e}")
+        return None
+
+
+async def send_tg_document(client: httpx.AsyncClient, chat_id: int | str, filename: str, content: str | bytes, caption: str = ""):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    files = {"document": (filename, content, "application/json")}
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    try:
+        r = await client.post(url, data=data, files=files, timeout=25.0)
+        return r.json()
+    except Exception as e:
+        print(f"[TG Error] send_tg_document: {e}")
+        return None
+
+
+# ─── OTP Doctor API Helpers ───────────────────────────────────────────────────
+async def otpd_balance(client: httpx.AsyncClient, api_key: str) -> str:
+    try:
+        r = await client.get(OTP_DOCTOR_BASE, params={"action": "getBalance", "api_key": api_key}, timeout=10)
+        t = r.text.strip()
+        return t.split(":")[1] if t.startswith("ACCESS_BALANCE:") else t
+    except Exception as e:
+        return f"Error ({e})"
+
+
+async def otpd_buy(client: httpx.AsyncClient, api_key: str, svc_id: str) -> dict:
+    try:
+        r = await client.get(OTP_DOCTOR_BASE, params={"action": "getNumber", "api_key": api_key, "service": svc_id}, timeout=15)
+        t = r.text.strip()
+        if t.startswith("ACCESS_NUMBER:"):
+            parts = t.split(":")
+            return {"ok": True, "id": parts[1], "phone": clean_phone(parts[2]), "raw": parts[2], "server_id": svc_id}
+        return {"ok": False, "error": t, "server_id": svc_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "server_id": svc_id}
+
+
+async def otpd_cancel(client: httpx.AsyncClient, api_key: str, act_id: str) -> bool:
+    for _ in range(5):
+        try:
+            r = await client.get(OTP_DOCTOR_BASE, params={"action": "setStatus", "api_key": api_key, "id": act_id, "status": "8"}, timeout=10)
+            t = r.text.strip()
+            if "CANCEL" in t or "ACCESS" in t:
+                return True
+        except Exception:
+            pass
+
+        try:
+            r2 = await client.get(
+                "https://www.otpdoctor.in/api/service/cancelNumberq.php",
+                params={"token": OTP_DOCTOR_WEB_TOKEN, "id": act_id},
+                headers={"user-agent": CHECKER_HEADERS_1["user-agent"]},
+                timeout=10,
+            )
+            data = r2.json()
+            if data.get("status") == 200:
+                return True
+            if data.get("status") == 600:
+                wait_sec = parse_wait_time(data.get("message", ""))
+                await asyncio.sleep(wait_sec + 2)
+                continue
+        except Exception:
+            pass
+
+        await asyncio.sleep(3)
+    return False
+
+
+async def otpd_get_sms(client: httpx.AsyncClient, api_key: str, act_id: str) -> dict:
+    try:
+        r = await client.get(OTP_DOCTOR_BASE, params={"action": "getStatus", "api_key": api_key, "id": act_id}, timeout=10)
+        t = r.text.strip()
+        if t.startswith("STATUS_OK:"):
+            return {"ok": True, "sms": t.split(":", 1)[1]}
+        elif t == "STATUS_WAIT_CODE":
+            return {"ok": False, "waiting": True}
+        else:
+            return {"ok": False, "waiting": False, "error": t}
+    except Exception as e:
+        return {"ok": False, "waiting": False, "error": str(e)}
+
+
+# ─── Web Registration Checker ─────────────────────────────────────────────────
+async def check_meesho_reg(client: httpx.AsyncClient, phone: str) -> dict:
+    payload = {"number": phone}
+    for url, hdr in [(CHECKER_PRIMARY, CHECKER_HEADERS_1), (CHECKER_FALLBACK, CHECKER_HEADERS_2)]:
+        try:
+            r = await client.post(url, json=payload, headers=hdr, timeout=10)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("ok") and d.get("results"):
+                    res = d["results"][0]
+                    return {
+                        "registered": res.get("registered", False),
+                        "fresh": res.get("fresh", False),
+                        "ok": True,
+                    }
+        except Exception:
+            continue
+    return {"registered": None, "fresh": None, "ok": False}
+
+
+# ─── Send OTP & Verify (Crowstack + Fallback) ──────────────────────────────────
+async def send_meesho_otpless_fallback(client: httpx.AsyncClient, phone: str, dev: dict) -> dict:
+    ts_id, in_id = _ts_id(), _ts_id()
+    hdr = {"user-agent": OTPLESS_UA}
+    try:
+        st_resp = await client.get(
+            "https://user-auth.otpless.app/v2/state",
+            params={
+                "origin": OTPLESS_ORIGIN, "version": "V3", "tsId": ts_id, "inId": in_id,
+                "isHeadless": "true", "platform": "android", "isLoginPage": "false",
+                "packageName": OTPLESS_PACKAGE, "package": OTPLESS_PACKAGE,
+                "appId": OTPLESS_APP_ID, "loginUri": OTPLESS_LOGIN_URI,
+                "deviceInfo": json.dumps(DEVICE_INFO_OTPLESS),
+            },
+            headers=hdr,
+            timeout=15,
+        )
+        state = (st_resp.json() or {}).get("state")
+        if not state:
+            return {"ok": False, "error": "State failed from OTPLESS"}
+
+        app_info = {
+            "platform": "android", "manufacturer": dev["manufacturer"],
+            "androidVersion": dev["os_version"], "packageName": OTPLESS_PACKAGE,
+            "model": dev["model"], "appSignature": OTPLESS_APP_SIG,
+            "hasTelegram": "true", "hasWhatsapp": "false", "sdkVersion": "1.3.3",
+            "inId": in_id, "tsId": ts_id,
+            "isSilentAuthSupported": "true", "isWebAuthnSupported": "true",
+            "isCellularDataEnabled": "false",
+            "secureDetail": {"simDetail": {"currentTransportType": "WiFi", "isSimInserted": "false"}},
+        }
+        intent_body = {
+            "selectedCountryCode": "+91", "mobile": f"91{phone}",
+            "silentAuthEnabled": False, "hasWhatsapp": "false", "deliveryChannel": "SMS",
+            "metadata": json.dumps({
+                "appInfo": json.dumps(app_info),
+                "deviceInfo": json.dumps(DEVICE_INFO_OTPLESS),
+                "deviceIdInfo": json.dumps({"androidId": dev["android_id"], "gaid": dev["gaid"]}),
+            }),
+            "triggerWebauthn": False,
+            "clientMetaData": json.dumps({"tid": secrets.token_urlsafe(12)[:16]}),
+            "origin": OTPLESS_ORIGIN, "version": "V4",
+            "tsId": ts_id, "inId": in_id,
+            "deviceInfo": json.dumps(DEVICE_INFO_OTPLESS),
+            "loginUri": OTPLESS_LOGIN_URI, "appId": OTPLESS_APP_ID,
+            "isHeadless": True, "packageName": OTPLESS_PACKAGE, "package": OTPLESS_PACKAGE,
+            "otpHash": OTPLESS_OTP_HASH, "platform": "HEADLESS",
+        }
+
+        ir = await client.post(
+            f"https://user-auth.otpless.app/v3/lp/user/transaction/intent/{state}",
+            headers={**hdr, "content-type": "application/json; charset=utf-8"},
+            json=intent_body,
+            timeout=15,
+        )
+        data = ir.json() or {}
+        leap = data.get("quantumLeap") or {}
+        if not leap.get("uid") or not leap.get("channelAuthToken"):
+            return {"ok": False, "error": f"OTP intent rejected: {json.dumps(data)[:150]}"}
+
+        return {
+            "ok": True,
+            "session": {
+                "method": "otpless",
+                "state": state, "uid": leap["uid"], "token": leap["channelAuthToken"],
+                "as_id": leap.get("asId", ""), "ts_id": ts_id, "in_id": in_id,
+                "instance_id": dev["instance_id"],
+            },
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def verify_meesho_otpless_fallback(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict) -> dict:
+    otp_headers = {"user-agent": OTPLESS_UA, "content-type": "application/json; charset=utf-8"}
+    otp_body = {
+        "selectedCountryCode": "91", "mobile": phone, "otp": otp, "value": f"91{phone}",
+        "isOTPAutoRead": "false", "uid": session["uid"], "token": session["token"], "asId": session["as_id"],
+        "origin": OTPLESS_ORIGIN, "version": "V4", "tsId": session["ts_id"], "inId": session["in_id"],
+        "deviceInfo": json.dumps(DEVICE_INFO_OTPLESS, separators=(",", ":")),
+        "loginUri": OTPLESS_LOGIN_URI, "appId": OTPLESS_APP_ID,
+        "isHeadless": True, "packageName": OTPLESS_PACKAGE, "package": OTPLESS_PACKAGE,
+        "otpHash": OTPLESS_OTP_HASH, "platform": "HEADLESS",
+    }
+    try:
+        vr = await client.post(
+            f"https://user-auth.otpless.app/v3/lp/user/transaction/otp/{session['state']}",
+            headers=otp_headers, json=otp_body, timeout=15,
+        )
+        data = vr.json() or {}
+        ot = data.get("oneTap") or {}
+        token = ot.get("token")
+        id_token = (ot.get("merchantUserInfo") or {}).get("idToken")
+        if not token or not id_token:
+            status = (data.get("authDetail") or {}).get("status", "FAILED")
+            return {"ok": False, "error": f"OTP verification failed ({status})."}
+
+        key = gen_key()
+        login_body = {
+            "login_type": "otpless",
+            "otpless": {
+                "token": token,
+                "id_token": aes_gcm_encrypt(id_token.encode("utf-8"), key),
+                "aes_key_encrypted": rsa_encrypt(key),
+                "version": "v2",
+            },
+            "ga_id": dev["gaid"],
+        }
+        anon_hdr = {
+            "authorization": MEESHO_AUTH, "app-version": "29.1", "app-version-code": "860",
+            "instance-id": dev["instance_id"], "country-iso": "in",
+            "application-id": "com.meesho.supply", "app-session-id": dev["session_id"],
+            "app-sdk-version": "34", "app-client-id": "android", "xo": "",
+            "meesho-user-context": "anonymous", "content-type": "application/json; charset=UTF-8",
+            "user-agent": dev["user_agent"],
+        }
+        lr = await client.post(f"{MEESHO_API_BASE}/2.0/user/login", headers=anon_hdr, json=login_body, timeout=15)
+        if lr.status_code != 200:
+            return {"ok": False, "error": f"Login HTTP {lr.status_code}: {lr.text[:150]}"}
+
+        ld = lr.json() or {}
+        user = ld.get("user") or {}
+        xoox = ld.get("xoox") or {}
+        xo = xoox.get("xo") or ""
+        ox = xoox.get("ox") or ""
+        if not xo:
+            return {"ok": False, "error": "Login failed: No xo received."}
+
+        return {
+            "ok": True,
+            "user_id": user.get("user_id"),
+            "phone": user.get("phone"),
+            "xo": xo,
+            "ox": ox,
+            "is_new": bool(user.get("new")),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict) -> dict:
+    """Dispatches OTP using Crowstack API (primary), with fallback to direct OTPLESS."""
+    try:
+        payload = {"phone": phone, "ref_link": "", "force": True}
+        resp = await client.post(
+            f"{CROWSTACK_BASE}/send-otp",
+            headers=CROWSTACK_HEADERS,
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            if data.get("ok"):
+                return {
+                    "ok": True,
+                    "method": "crowstack",
+                    "registered": data.get("registered"),
+                    "bucket": data.get("bucket"),
+                    "session": {
+                        "method": "crowstack",
+                        "phone": phone,
+                        "instance_id": dev["instance_id"],
+                    },
+                }
+    except Exception as e:
+        print(f"[Crowstack send-otp warning] {e}")
+
+    return await send_meesho_otpless_fallback(client, phone, dev)
+
+
+async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict) -> dict:
+    """Verifies OTP via Crowstack (or fallback to OTPLESS)."""
+    if session.get("method") == "crowstack":
+        try:
+            payload = {"otp": otp}
+            resp = await client.post(
+                f"{CROWSTACK_BASE}/verify",
+                headers=CROWSTACK_HEADERS,
+                json=payload,
+                timeout=15,
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if data.get("ok"):
+                acc = data.get("account", {})
+                return {
+                    "ok": True,
+                    "user_id": acc.get("user_id"),
+                    "phone": acc.get("mobile", phone),
+                    "account": acc,
+                    "bucket": acc.get("offer_bucket") or acc.get("bucket"),
+                    "is_new": True,
+                }
+            err = data.get("error") or data.get("message") or "Verification failed"
+            return {"ok": False, "error": f"{err}"}
+        except Exception as e:
+            return {"ok": False, "error": f"Crowstack verify error: {str(e)}"}
+
+    return await verify_meesho_otpless_fallback(client, phone, otp, session, dev)
+
+
+# ─── Keyboards ────────────────────────────────────────────────────────────────
+MAIN_MENU_KEYBOARD = {
+    "keyboard": [
+        [{"text": "🚀 Start Hunt"}, {"text": "📱 Check My Number"}],
+        [{"text": "⚙️ Select Servers"}, {"text": "🔑 Set API Key"}],
+        [{"text": "📊 Stats"}, {"text": "💰 Balance"}],
+        [{"text": "🛑 Stop Hunt"}],
+    ],
+    "resize_keyboard": True,
+}
+
+
+def build_server_selection_keyboard(selected_servers: list, all_known: dict):
+    buttons = []
+    row = []
+    for sid, sinfo in all_known.items():
+        is_sel = sid in selected_servers
+        icon = "✅" if is_sel else "⬜"
+        label = f"{icon} {sinfo['name']} ({sinfo.get('price', '')})"
+        row.append({"text": f"/toggle_{sid}"})
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([{"text": "➕ Add Custom Server"}, {"text": "🔙 Back to Menu"}])
+    return {"keyboard": buttons, "resize_keyboard": True}
+
+
+# ─── Dual Server Hunter Task ──────────────────────────────────────────────────
+async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
+    state = ACTIVE_TASKS.get(chat_id)
+    if not state or not state["hunting"]:
+        return
+
+    cfg = get_user_config(chat_id)
+    api_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
+    servers = cfg.get("selected_servers", ["5841"])
+    if not servers:
+        servers = ["5841"]
+        update_user_config(chat_id, {"selected_servers": servers})
+
+    # Limit to max 2 servers
+    servers = servers[:2]
+
+    bal = await otpd_balance(client, api_key)
+    server_names = ", ".join(f"Server {s}" for s in servers)
+    await send_tg_message(
+        client,
+        chat_id,
+        f"🎯 <b>Multi-Server Hunting Started!</b>\n\n"
+        f"🏷️ <b>Active Servers (Max 2):</b> <code>{server_names}</code>\n"
+        f"🔄 <b>Mode:</b> Dual-Server Alternating Buy → Web Check → Auto-Cancel Old → Crowstack OTP Send → Auto SMS → Export JSON!\n"
+        f"💰 <b>Wallet Balance:</b> ₹{bal}\n\n"
+        f"<i>Current stats ke liye <b>/stats</b> dabayein.\nRokne ke liye <b>/stop</b> dabayein.</i>",
+    )
+
+    state["attempts"] = 0
+    state["registered_count"] = 0
+    state["accounts_created"] = 0
+    state["start_time"] = time.time()
+    state["last_summary_time"] = time.time()
+    server_idx = 0
+
+    while state.get("hunting") and not state.get("stop_flag"):
+        # Select server in round-robin fashion
+        current_server = servers[server_idx % len(servers)]
+        server_idx += 1
+
+        state["attempts"] += 1
+        att_num = state["attempts"]
+        print(f"[{time.strftime('%H:%M:%S')}] Attempt #{att_num}: Buying number from Server {current_server}...")
+
+        res = await otpd_buy(client, api_key, current_server)
+
+        if not res["ok"]:
+            err = res.get("error", "Unknown error")
+            print(f"[{time.strftime('%H:%M:%S')}] Server {current_server} Buy error: {err}")
+
+            if "NO_BALANCE" in err:
+                await send_tg_message(
+                    client,
+                    chat_id,
+                    f"⚠️ <b>Balance Kam Hai!</b> (Server {current_server})\nCancel refund aane ka wait kar rahe hain (har 2 min mein recheck)...",
+                )
+                refund_done = False
+                for _ in range(5):
+                    if state.get("stop_flag"):
+                        break
+                    await asyncio.sleep(120)
+                    new_bal = await otpd_balance(client, api_key)
+                    try:
+                        if float(new_bal) >= 10.0:
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"✅ <b>Refund aa gaya!</b> Naya Balance: ₹{new_bal}\nHunting continue kar rahe hain...",
+                            )
+                            refund_done = True
+                            break
+                    except ValueError:
+                        pass
+                if not refund_done:
+                    await send_tg_message(
+                        client,
+                        chat_id,
+                        f"❌ <b>Balance insufficient!</b> Current Balance: ₹{await otpd_balance(client, api_key)}\nKripya recharge karein ya /stop karein.",
+                    )
+                    break
+                continue
+
+            if "NO_NUMBERS" in err or "TRY_AGAIN" in err:
+                # If 2 servers are configured, immediately try the other server
+                if len(servers) > 1:
+                    await asyncio.sleep(2)
+                else:
+                    await asyncio.sleep(10)
+                continue
+
+            await asyncio.sleep(5)
+            continue
+
+        act_id = res["id"]
+        phone = res["phone"]
+        state["active_id"] = act_id
+        print(f"[{time.strftime('%H:%M:%S')}] Got number: {phone} (ID: {act_id}, Server: {current_server}) — checking registration...")
+
+        chk = await check_meesho_reg(client, phone)
+        if not chk["ok"]:
+            await asyncio.sleep(2)
+            chk = await check_meesho_reg(client, phone)
+
+        is_reg = chk.get("registered")
+
+        # ── Registered (Old User) → Silently cancel, wait for refund ──
+        if is_reg is True:
+            state["registered_count"] += 1
+            print(f"[{time.strftime('%H:%M:%S')}] Number {phone} is REGISTERED. Cancelling Server {current_server}...")
+            await otpd_cancel(client, api_key, act_id)
+            state["active_id"] = None
+            await asyncio.sleep(8)
+            continue
+
+        # ── FRESH / UNREGISTERED NUMBER FOUND! ──
+        print(f"[{time.strftime('%H:%M:%S')}] 🎉 FRESH NUMBER FOUND: {phone} (ID: {act_id}, Server: {current_server})")
+        await send_tg_message(
+            client,
+            chat_id,
+            f"🎉 <b>FRESH MEESHO NUMBER MILA!</b>\n\n"
+            f"📱 <b>Mobile Number:</b> <code>+91{phone}</code>\n"
+            f"🏷️ <b>Server:</b> <code>{current_server}</code>\n"
+            f"🆔 <b>Activation ID:</b> <code>{act_id}</code>\n\n"
+            f"📤 <b>Meesho OTP send kiya ja raha hai...</b>",
+        )
+
+        dev = mk_device()
+        otp_res = await send_meesho_otp(client, phone, dev)
+        if not otp_res.get("ok"):
+            err_str = otp_res.get("error", "Failed")
+            await send_tg_message(client, chat_id, f"❌ OTP send failed: <code>{err_str}</code>\nCancelling number for refund...")
+            await otpd_cancel(client, api_key, act_id)
+            state["active_id"] = None
+            await asyncio.sleep(8)
+            continue
+
+        session_dict = otp_res["session"]
+        await send_tg_message(client, chat_id, f"⏳ <b>OTP sent! Server {current_server} par SMS ka wait kar rahe hain (max 3 min)...</b>")
+
+        # ── Step 3: Poll OTP Doctor for incoming SMS ──
+        otp_code = None
+        sms_text = ""
+        start_wait = time.time()
+
+        while (time.time() - start_wait) < 180:
+            if state.get("stop_flag"):
+                await otpd_cancel(client, api_key, act_id)
+                state["active_id"] = None
+                return
+
+            sms_res = await otpd_get_sms(client, api_key, act_id)
+            if sms_res.get("ok"):
+                sms_text = sms_res.get("sms", "")
+                digits = re.findall(r"\b\d{4,6}\b", sms_text)
+                if digits:
+                    otp_code = digits[0]
+                    print(f"[{time.strftime('%H:%M:%S')}] 🔑 Extracted OTP: {otp_code}")
+                    break
+            await asyncio.sleep(4)
+
+        if not otp_code:
+            await send_tg_message(
+                client,
+                chat_id,
+                f"⏰ <b>SMS Timeout!</b> OTP nahi aaya.\nNumber <code>{act_id}</code> cancel karke refund le rahe hain...\n⏳ Naye numbers dhoondhna continue rahega!",
+            )
+            await otpd_cancel(client, api_key, act_id)
+            state["active_id"] = None
+            await asyncio.sleep(8)
+            continue
+
+        # ── Step 4: Verify OTP & Login to Meesho ──
+        await send_tg_message(
+            client,
+            chat_id,
+            f"📩 <b>SMS Aaya:</b> <code>{sms_text}</code>\n"
+            f"🔑 <b>OTP:</b> <code>{otp_code}</code>\n"
+            f"🔐 <b>Meesho account login ho raha hai...</b>",
+        )
+
+        login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev)
+
+        if login_res.get("ok"):
+            state["accounts_created"] += 1
+            user_id = login_res.get("user_id")
+
+            account_data = {
+                "mobile": phone,
+                "user_id": user_id,
+                "account": login_res.get("account", {}),
+                "identity": {
+                    "instance_id": dev["instance_id"],
+                    "gaid": dev["gaid"],
+                },
+                "_meta": {
+                    "is_new": login_res.get("is_new", True),
+                    "is_first_order": True,
+                    "server_id": current_server,
+                    "bucket": login_res.get("bucket"),
+                },
+            }
+            if login_res.get("xo"):
+                account_data["xo"] = login_res.get("xo")
+            if login_res.get("ox"):
+                account_data["ox"] = login_res.get("ox")
+
+            os.makedirs("accounts", exist_ok=True)
+            fname = f"accounts/account_{phone}.json"
+            json_str = json.dumps(account_data, indent=2, ensure_ascii=False)
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write(json_str)
+
+            account_msg = (
+                f"🎉 <b>MEESHO ACCOUNT SUCCESSFULLY CREATED!</b>\n\n"
+                f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
+                f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
+                f"🏷️ <b>Server:</b> <code>{current_server}</code>\n\n"
+                f"📋 <b>Account JSON:</b>\n"
+                f"<pre><code>{json_str}</code></pre>"
+            )
+            await send_tg_message(client, chat_id, account_msg)
+
+            await send_tg_document(
+                client,
+                chat_id,
+                filename=f"meesho_{phone}.json",
+                content=json_str,
+                caption=f"✅ Meesho Account: +91{phone} (Server {current_server})",
+            )
+
+            state["active_id"] = None
+        else:
+            err_msg = login_res.get("error", "Login failed")
+            await send_tg_message(client, chat_id, f"❌ Meesho login failed: <code>{err_msg}</code>\nCancelling number...")
+            await otpd_cancel(client, api_key, act_id)
+            state["active_id"] = None
+
+        await asyncio.sleep(8)
+
+    state["hunting"] = False
+    state["active_id"] = None
+    final_bal = await otpd_balance(client, api_key)
+    total_time_mins = int((time.time() - state.get("start_time", time.time())) // 60)
+    await send_tg_message(
+        client,
+        chat_id,
+        f"🏁 <b>Hunting Session Stopped!</b>\n\n"
+        f"⏱️ <b>Total Runtime:</b> {total_time_mins} minutes\n"
+        f"🔄 <b>Total Attempts:</b> {state.get('attempts', 0)}\n"
+        f"❌ <b>Registered (Cancelled):</b> {state.get('registered_count', 0)}\n"
+        f"🎉 <b>Accounts Created:</b> {state.get('accounts_created', 0)}\n"
+        f"💰 <b>Final Balance:</b> ₹{final_bal}\n\n"
+        f"Dobara chalane ke liye <b>🚀 Start Hunt</b> dabayein.",
+        reply_markup=MAIN_MENU_KEYBOARD,
+    )
+
+
+# ─── Manual Number Check & Login Handlers ─────────────────────────────────────
+async def handle_manual_number_check(client: httpx.AsyncClient, chat_id: int | str, state: dict, phone: str):
+    phone = clean_phone(phone)
+    if len(phone) != 10 or phone[0] not in "6789":
+        await send_tg_message(client, chat_id, "❌ Kripya valid 10-digit Indian mobile number bhejein (jaise: <code>9876543210</code>).")
+        return
+
+    await send_tg_message(client, chat_id, f"🔍 Checking <code>+91{phone}</code> on Meesho...")
+    chk = await check_meesho_reg(client, phone)
+    if not chk["ok"]:
+        await asyncio.sleep(1)
+        chk = await check_meesho_reg(client, phone)
+
+    confirm_markup = {
+        "keyboard": [
+            [{"text": "✅ Yes, Send OTP"}, {"text": "❌ Cancel"}],
+        ],
+        "resize_keyboard": True,
+    }
+
+    if chk.get("registered") is True:
+        state["manual_step"] = "confirm_otp"
+        state["manual_phone"] = phone
+        state["is_registered"] = True
+        await send_tg_message(
+            client,
+            chat_id,
+            f"⚠️ <code>+91{phone}</code> <b>REGISTERED (Old User)</b> hai!\n\n"
+            f"Is number par Meesho ka account pehle se bana hua hai.\n"
+            f"👉 Kya aap <b>phir bhi OTP bhej kar login karna chahte hain</b>?",
+            reply_markup=confirm_markup,
+        )
+    else:
+        state["manual_step"] = "confirm_otp"
+        state["manual_phone"] = phone
+        state["is_registered"] = False
+        await send_tg_message(
+            client,
+            chat_id,
+            f"✅ <code>+91{phone}</code> <b>FRESH (Unregistered)</b> hai! 🎉\n\n"
+            f"Kya is number ke liye OTP bhejna hai?",
+            reply_markup=confirm_markup,
+        )
+
+
+async def handle_manual_send_otp(client: httpx.AsyncClient, chat_id: int | str, state: dict):
+    phone = state.get("manual_phone")
+    if not phone:
+        state["manual_step"] = None
+        await send_tg_message(client, chat_id, "⚠️ Koi number select nahi hai. 📱 Check My Number par click karein.", reply_markup=MAIN_MENU_KEYBOARD)
+        return
+
+    dev = mk_device()
+    await send_tg_message(client, chat_id, f"📤 <b>Meesho OTP send kiya ja raha hai (+91{phone})...</b>")
+
+    otp_res = await send_meesho_otp(client, phone, dev)
+    if not otp_res.get("ok"):
+        state["manual_step"] = None
+        err_str = otp_res.get("error", "Failed")
+        await send_tg_message(client, chat_id, f"❌ OTP send failed: <code>{err_str}</code>", reply_markup=MAIN_MENU_KEYBOARD)
+        return
+
+    state["manual_step"] = "awaiting_otp"
+    state["manual_session"] = otp_res["session"]
+    state["manual_dev"] = dev
+
+    cancel_markup = {
+        "keyboard": [
+            [{"text": "❌ Cancel"}],
+        ],
+        "resize_keyboard": True,
+    }
+    await send_tg_message(
+        client,
+        chat_id,
+        f"📩 <b>OTP Sent to +91{phone}!</b>\n\n"
+        f"👉 Aapke phone par 6-digit OTP aaya hoga.\n"
+        f"Yahan OTP likhkar bhejein (jaise: <code>123456</code>):",
+        reply_markup=cancel_markup,
+    )
+
+
+async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str, state: dict, otp_code: str):
+    phone = state.get("manual_phone")
+    session_dict = state.get("manual_session")
+    dev = state.get("manual_dev")
+
+    if not phone or not session_dict or not dev:
+        state["manual_step"] = None
+        await send_tg_message(client, chat_id, "⚠️ Session expire ho gaya. Kripya dobara try karein.", reply_markup=MAIN_MENU_KEYBOARD)
+        return
+
+    await send_tg_message(client, chat_id, f"🔐 <b>Verifying OTP {otp_code} & Logging into Meesho...</b>")
+    login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev)
+
+    if login_res.get("ok"):
+        state["manual_step"] = None
+        state["manual_phone"] = None
+        user_id = login_res.get("user_id")
+
+        is_reg = state.get("is_registered", False)
+        account_data = {
+            "mobile": phone,
+            "user_id": user_id,
+            "account": login_res.get("account", {}),
+            "identity": {
+                "instance_id": dev["instance_id"],
+                "gaid": dev["gaid"],
+            },
+            "_meta": {
+                "is_new": False if is_reg else login_res.get("is_new", True),
+                "is_first_order": False if is_reg else True,
+                "bucket": login_res.get("bucket"),
+            },
+        }
+        if login_res.get("xo"):
+            account_data["xo"] = login_res.get("xo")
+        if login_res.get("ox"):
+            account_data["ox"] = login_res.get("ox")
+
+        os.makedirs("accounts", exist_ok=True)
+        fname = f"accounts/account_{phone}.json"
+        json_str = json.dumps(account_data, indent=2, ensure_ascii=False)
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(json_str)
+
+        account_msg = (
+            f"🎉 <b>MEESHO ACCOUNT SUCCESSFULLY CREATED!</b>\n\n"
+            f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
+            f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
+            f"🏷️ <b>Type:</b> {'Old User' if is_reg else 'Fresh User'}\n\n"
+            f"📋 <b>Account JSON:</b>\n"
+            f"<pre><code>{json_str}</code></pre>"
+        )
+        await send_tg_message(client, chat_id, account_msg, reply_markup=MAIN_MENU_KEYBOARD)
+
+        await send_tg_document(
+            client,
+            chat_id,
+            filename=f"meesho_{phone}.json",
+            content=json_str,
+            caption=f"✅ Meesho Account: +91{phone}",
+        )
+    else:
+        err_msg = login_res.get("error", "Login failed")
+        await send_tg_message(client, chat_id, f"❌ <b>OTP Wrong ya Expired:</b> <code>{err_msg}</code>\n\nDobara OTP daalein ya cancel karne ke liye /cancel bhejein.")
+
+
+# ─── Telegram Bot Polling Loop ────────────────────────────────────────────────
+async def bot_loop():
+    print("🤖 Multi-Server Meesho Bot Started! (@BotFather verified)")
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", json={"drop_pending_updates": True}, timeout=10)
+        except Exception:
+            pass
+
+        offset = 0
+
+        while True:
+            try:
+                r = await client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                    json={"offset": offset, "timeout": 25, "allowed_updates": ["message"]},
+                    timeout=35.0,
+                )
+                data = r.json()
+                updates = data.get("result", [])
+
+                for u in updates:
+                    offset = u["update_id"] + 1
+                    msg = u.get("message")
+                    if not msg:
+                        continue
+
+                    chat_id = msg["chat"]["id"]
+                    text = (msg.get("text") or "").strip()
+
+                    if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
+                        await send_tg_message(client, chat_id, "⛔ <b>Access Denied!</b> Yeh bot private hai.")
+                        continue
+
+                    state = ACTIVE_TASKS.setdefault(chat_id, {"hunting": False, "active_id": None, "stop_flag": False})
+                    cfg = get_user_config(chat_id)
+                    all_servers = {**KNOWN_SERVERS, **cfg.get("custom_servers", {})}
+
+                    # ── /cancel or ❌ Cancel ──
+                    if text in ("/cancel", "❌ Cancel", "cancel", "🔙 Back to Menu"):
+                        state["manual_step"] = None
+                        state["manual_phone"] = None
+                        await send_tg_message(client, chat_id, "✅ Main menu par aa gaye.", reply_markup=MAIN_MENU_KEYBOARD)
+                        continue
+
+                    # ── /start or /help ──
+                    if text.startswith("/start") or text.startswith("/help"):
+                        cur_servers = cfg.get("selected_servers", ["5841"])
+                        cur_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
+                        masked_key = cur_key[:4] + "..." + cur_key[-4:] if len(cur_key) >= 8 else "Not set"
+                        menu_text = (
+                            f"👋 <b>Meesho Multi-Server Hunter Bot</b>\n\n"
+                            f"⚙️ <b>Current Settings:</b>\n"
+                            f"• <b>Active Servers (Max 2):</b> <code>{', '.join(cur_servers)}</code>\n"
+                            f"• <b>OTP Doctor API Key:</b> <code>{masked_key}</code>\n\n"
+                            f"📌 <b>Features:</b>\n"
+                            f"1️⃣ <b>🚀 Start Hunt</b> — Dual servers se fresh number dhoondhkar auto login karke JSON export karta hai.\n"
+                            f"2️⃣ <b>📱 Check My Number</b> — Apna number check karein, registered hone par bhi OTP bhejne ka option milega.\n"
+                            f"3️⃣ <b>⚙️ Select Servers</b> — Max 2 servers choose karein ya naya server add karein.\n"
+                            f"4️⃣ <b>🔑 Set API Key</b> — Apna personal OTP Doctor API Key save karein.\n"
+                            f"5️⃣ <b>💰 Balance</b> — Apne wallet ka balance check karein.\n"
+                            f"6️⃣ <b>🛑 Stop Hunt</b> — Hunting band karein."
+                        )
+                        await send_tg_message(client, chat_id, menu_text, reply_markup=MAIN_MENU_KEYBOARD)
+
+                    # ── 🔑 Set API Key ──
+                    elif text.startswith("/setkey") or text == "🔑 Set API Key":
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and len(parts[1].strip()) >= 10:
+                            new_key = parts[1].strip()
+                            # Verify key
+                            test_bal = await otpd_balance(client, new_key)
+                            if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
+                                update_user_config(chat_id, {"api_key": new_key})
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"✅ <b>API Key Successfully Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}",
+                                    reply_markup=MAIN_MENU_KEYBOARD,
+                                )
+                            else:
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"❌ <b>Invalid API Key!</b> OTP Doctor ne reject kiya: <code>{test_bal}</code>\nKripya sahi key bhejein.",
+                                    reply_markup=MAIN_MENU_KEYBOARD,
+                                )
+                        else:
+                            state["manual_step"] = "awaiting_api_key"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "🔑 <b>Apna OTP Doctor API Key bhejein:</b>\n<i>(OTP Doctor dashboard se copy karke yahan paste karein)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_api_key":
+                        candidate_key = text.strip()
+                        test_bal = await otpd_balance(client, candidate_key)
+                        if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
+                            update_user_config(chat_id, {"api_key": candidate_key})
+                            state["manual_step"] = None
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🎉 <b>API Key Verified & Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}",
+                                reply_markup=MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"❌ <b>API Key Invalid!</b> Error: <code>{test_bal}</code>\nDobara sahi key bhejein ya /cancel karein.",
+                            )
+
+                    # ── ⚙️ Select Servers (Max 2) ──
+                    elif text.startswith("/servers") or text == "⚙️ Select Servers":
+                        sel = cfg.get("selected_servers", ["5841"])
+                        text_msg = (
+                            f"⚙️ <b>Server Selection (Max 2 Servers):</b>\n\n"
+                            f"Currently Selected: <b>{', '.join(sel) if sel else 'None'}</b>\n\n"
+                            f"Kisi bhi server par click karke ON/OFF toggle karein.\n"
+                            f"<i>(Note: Ek sath maximum 2 servers active reh sakte hain)</i>"
+                        )
+                        kb = build_server_selection_keyboard(sel, all_servers)
+                        await send_tg_message(client, chat_id, text_msg, reply_markup=kb)
+
+                    # Toggle server callback (e.g. /toggle_5841)
+                    elif text.startswith("/toggle_"):
+                        sid = text.replace("/toggle_", "").strip()
+                        sel = list(cfg.get("selected_servers", ["5841"]))
+                        if sid in sel:
+                            if len(sel) == 1:
+                                await send_tg_message(client, chat_id, "⚠️ Kam se kam 1 server select hona zaroori hai!")
+                            else:
+                                sel.remove(sid)
+                                update_user_config(chat_id, {"selected_servers": sel})
+                                await send_tg_message(client, chat_id, f"❌ Server {sid} Deselected. Active: {', '.join(sel)}")
+                        else:
+                            if len(sel) >= 2:
+                                await send_tg_message(client, chat_id, f"⚠️ <b>Max 2 Servers Allowed!</b>\nPehle kisi ek active server ko uncheck karein.")
+                            else:
+                                sel.append(sid)
+                                update_user_config(chat_id, {"selected_servers": sel})
+                                await send_tg_message(client, chat_id, f"✅ Server {sid} Selected! Active: {', '.join(sel)}")
+
+                        cfg = get_user_config(chat_id)
+                        all_servers = {**KNOWN_SERVERS, **cfg.get("custom_servers", {})}
+                        kb = build_server_selection_keyboard(cfg.get("selected_servers", []), all_servers)
+                        await send_tg_message(client, chat_id, f"Updated Active Servers: <b>{', '.join(cfg.get('selected_servers', []))}</b>", reply_markup=kb)
+
+                    # ── Add Custom Server ID ──
+                    elif text == "➕ Add Custom Server" or text.startswith("/addserver"):
+                        parts = text.split()
+                        if len(parts) == 2 and parts[1].isdigit():
+                            sid = parts[1]
+                            custom = cfg.get("custom_servers", {})
+                            custom[sid] = {"id": sid, "name": f"Server {sid}", "price": "Custom"}
+                            update_user_config(chat_id, {"custom_servers": custom})
+                            await send_tg_message(client, chat_id, f"✅ Naya Server {sid} add ho gaya! /servers par jakar select kar sakte hain.")
+                        else:
+                            state["manual_step"] = "awaiting_custom_server"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(client, chat_id, "➕ <b>Custom Server ID bhejein:</b>\n<i>(Jaise: <code>2795</code> ya <code>5841</code>)</i>", reply_markup=cancel_markup)
+
+                    elif state.get("manual_step") == "awaiting_custom_server":
+                        sid = text.strip()
+                        if sid.isdigit():
+                            custom = cfg.get("custom_servers", {})
+                            custom[sid] = {"id": sid, "name": f"Server {sid}", "price": "Custom"}
+                            update_user_config(chat_id, {"custom_servers": custom})
+                            state["manual_step"] = None
+                            await send_tg_message(client, chat_id, f"✅ Server <code>{sid}</code> successfully add ho gaya!", reply_markup=MAIN_MENU_KEYBOARD)
+                        else:
+                            await send_tg_message(client, chat_id, "❌ Kripya sirf numeric Server ID bhejein (jaise: <code>5841</code>).")
+
+                    # ── 🚀 Start Hunt ──
+                    elif text.startswith("/hunt") or text == "🚀 Start Hunt":
+                        if state.get("hunting"):
+                            await send_tg_message(client, chat_id, "⚠️ Hunting already chal rahi hai! Live stats ke liye <b>/stats</b> dabayein.")
+                        else:
+                            sel_servers = cfg.get("selected_servers", ["5841"])
+                            if not sel_servers:
+                                sel_servers = ["5841"]
+                                update_user_config(chat_id, {"selected_servers": sel_servers})
+                            state["hunting"] = True
+                            state["active_id"] = None
+                            state["stop_flag"] = False
+                            asyncio.create_task(run_multi_hunter_task(client, chat_id))
+
+                    # ── 📱 Check My Number ──
+                    elif text.startswith("/check") or text == "📱 Check My Number":
+                        parts = text.split()
+                        if len(parts) >= 2 and len(clean_phone(parts[1])) == 10:
+                            num = clean_phone(parts[1])
+                            await handle_manual_number_check(client, chat_id, state, num)
+                        else:
+                            state["manual_step"] = "awaiting_number"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "📱 <b>Apna 10-digit mobile number bhejein:</b>\n<i>(Jaise: <code>9876543210</code>)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    # ── Confirm OTP Dispatch (Yes / No) ──
+                    elif state.get("manual_step") == "confirm_otp" and text in ("✅ Yes, Send OTP", "yes", "Yes", "/yes"):
+                        await handle_manual_send_otp(client, chat_id, state)
+
+                    # ── Awaiting OTP Code ──
+                    elif state.get("manual_step") == "awaiting_otp":
+                        digits = re.findall(r"\b\d{4,6}\b", text)
+                        if digits:
+                            await handle_manual_verify_otp(client, chat_id, state, digits[0])
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Kripya valid 4 ya 6-digit OTP code bhejein. Cancel karne ke liye /cancel bhejein.")
+
+                    # ── Number Input ──
+                    elif state.get("manual_step") == "awaiting_number" or (len(clean_phone(text)) == 10 and clean_phone(text)[0] in "6789" and not state.get("hunting")):
+                        num = clean_phone(text)
+                        await handle_manual_number_check(client, chat_id, state, num)
+
+                    # ── 📊 Stats ──
+                    elif text.startswith("/stats") or text == "📊 Stats":
+                        api_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
+                        b = await otpd_balance(client, api_key)
+                        sel_servers = cfg.get("selected_servers", ["5841"])
+                        if state and state.get("hunting"):
+                            runtime_mins = int((time.time() - state.get("start_time", time.time())) // 60)
+                            stats_text = (
+                                f"📊 <b>LIVE DUAL-SERVER HUNTING STATS</b>\n\n"
+                                f"⚡ <b>Status:</b> 🟢 Running\n"
+                                f"⏱️ <b>Uptime:</b> {runtime_mins} minutes\n"
+                                f"🏷️ <b>Active Servers:</b> {', '.join(sel_servers)}\n"
+                                f"🔄 <b>Total Attempts:</b> {state.get('attempts', 0)}\n"
+                                f"❌ <b>Registered (Cancelled):</b> {state.get('registered_count', 0)}\n"
+                                f"🎉 <b>Accounts Created:</b> {state.get('accounts_created', 0)}\n"
+                                f"💰 <b>Wallet Balance:</b> ₹{b}"
+                            )
+                        else:
+                            stats_text = (
+                                f"📊 <b>BOT STATS</b>\n\n"
+                                f"⚡ <b>Status:</b> ⚪ Idle (Not running)\n"
+                                f"🏷️ <b>Configured Servers:</b> {', '.join(sel_servers)}\n"
+                                f"🔄 <b>Last Session Attempts:</b> {state.get('attempts', 0) if state else 0}\n"
+                                f"🎉 <b>Accounts Created:</b> {state.get('accounts_created', 0) if state else 0}\n"
+                                f"💰 <b>Wallet Balance:</b> ₹{b}\n\n"
+                                f"Start karne ke liye <b>🚀 Start Hunt</b> dabayein."
+                            )
+                        await send_tg_message(client, chat_id, stats_text)
+
+                    # ── 💰 Balance ──
+                    elif text.startswith("/balance") or text == "💰 Balance":
+                        api_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
+                        b = await otpd_balance(client, api_key)
+                        masked_key = api_key[:4] + "..." + api_key[-4:] if len(api_key) >= 8 else api_key
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            f"💰 <b>OTP Doctor Balance:</b> ₹{b}\n🔑 <b>Active Key:</b> <code>{masked_key}</code>",
+                        )
+
+                    # ── 🛑 Stop Hunt ──
+                    elif text.startswith("/stop") or text == "🛑 Stop Hunt":
+                        if state.get("hunting"):
+                            state["stop_flag"] = True
+                            act_id = state.get("active_id")
+                            if act_id:
+                                api_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
+                                await send_tg_message(client, chat_id, f"🛑 Active number <code>{act_id}</code> cancel ho raha hai...")
+                                await otpd_cancel(client, api_key, act_id)
+                                state["active_id"] = None
+                            await send_tg_message(client, chat_id, "🛑 <b>Hunting Stop kar di gayi hai.</b>")
+                        else:
+                            await send_tg_message(client, chat_id, "ℹ️ Koi active hunt nahi chal rahi hai.")
+
+            except Exception as e:
+                print(f"[Polling Exception] {e}")
+                await asyncio.sleep(2)
+
+
+def main():
+    t = threading.Thread(target=start_health_server, daemon=True)
+    t.start()
+    asyncio.run(bot_loop())
+
+
+if __name__ == "__main__":
+    main()
