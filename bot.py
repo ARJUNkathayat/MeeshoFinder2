@@ -138,10 +138,11 @@ KEY_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#
 
 # ─── Default Known Meesho Servers ─────────────────────────────────────────────
 KNOWN_SERVERS = {
-    "5841": {"id": "5841", "name": "Server 5841", "price": "₹12"},
-    "2795": {"id": "2795", "name": "Server 2795", "price": "₹10"},
-    "2831": {"id": "2831", "name": "Server 2831", "price": "₹10"},
-    "3012": {"id": "3012", "name": "Server 3012", "price": "₹11"},
+    "5841": {"id": "5841", "name": "Server 5841 Ind8", "price": "₹12"},
+    
+    
+    "19826": {"id": "19826", "name": "Server 19826MeeshoIn-9", "price": "₹9"},
+
 }
 
 USER_CONFIGS_FILE = "user_configs.json"
