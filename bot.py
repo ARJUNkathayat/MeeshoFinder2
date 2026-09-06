@@ -202,6 +202,17 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"status":"ok","service":"Meesho Multi-Server Hunter Bot"}')
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+
+    def do_POST(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok"}')
+
     def log_message(self, format, *args):
         pass
 
