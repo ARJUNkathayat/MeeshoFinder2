@@ -80,6 +80,38 @@ CROWSTACK_HEADERS = {
     "sec-ch-ua-platform": '"Windows"',
 }
 
+# User Referral Program Link
+REFERRAL_LINK = "https://app.meesho.com/2yoV/r99th0qd?via=9qx7y4&from=referral_program"
+
+# ─── Hidenfree APIs (Secondary Signup & Offer API) ───────────────────────────
+HIDENFREE_BASE = "https://meeshoji.hidenfree.com/api"
+HIDENFREE_HEADERS = {
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "content-type": "application/json",
+    "origin": "https://meeshoji.hidenfree.com",
+    "priority": "u=1, i",
+    "referer": "https://meeshoji.hidenfree.com/",
+    "sec-ch-ua": '"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-storage-access": "active",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "x-session-token": "xhtB-VXF6ovxbGtzcH4rG2jIcRfRwZDYqbexKi9xSIM",
+    "x-telegram-init-data": (
+        "query_id=AAEVN7JtAwAAABU3sm1dbv1t&user=%7B%22id%22%3A8282846997%2C"
+        "%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C"
+        "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
+        "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
+        "%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D"
+        "&auth_date=1788664785&signature=pR7gnaXuO8XjW0Tl2YsNmyDNte-gOqIMH03dUvxjj0MKu1X1WD_lPjyHk6UIFocuWAt1WgDzaW1XuUsc4AlGCw"
+        "&hash=133f05679fb179deec52c5ceddd68aa5dee2239825048bdeacb3f2a05fdf04fe"
+    ),
+}
+
 # ─── Web Registration Checker APIs ────────────────────────────────────────────
 CHECKER_PRIMARY = "https://pricetrackerpro.fojadomain.fun/api/check"
 CHECKER_FALLBACK = "https://promeesho.eu.cc/api/check"
@@ -402,7 +434,24 @@ async def check_meesho_reg(client: httpx.AsyncClient, phone: str) -> dict:
         except Exception as e:
             last_err = str(e)
             continue
-    return {"registered": None, "fresh": None, "ok": False, "error": last_err or "Both checker endpoints unreachable"}
+
+    # 2. Third Fallback: Hidenfree check-phone API
+    try:
+        r_hf = await client.post(f"{HIDENFREE_BASE}/login/check-phone", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=10)
+        if r_hf.status_code == 200:
+            d_hf = r_hf.json()
+            if d_hf.get("ok"):
+                is_reg = bool(d_hf.get("registered", False))
+                return {
+                    "registered": is_reg,
+                    "fresh": not is_reg,
+                    "ok": True,
+                    "error": None,
+                }
+    except Exception as e:
+        last_err = str(e)
+
+    return {"registered": None, "fresh": None, "ok": False, "error": last_err or "All checker endpoints unreachable"}
 
 
 # ─── Send OTP & Verify (Crowstack + Fallback) ──────────────────────────────────
@@ -546,9 +595,10 @@ async def verify_meesho_otpless_fallback(client: httpx.AsyncClient, phone: str, 
 
 
 async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict) -> dict:
-    """Dispatches OTP using Crowstack API (primary), with fallback to direct OTPLESS."""
+    """Dispatches OTP using Crowstack API (primary), with fallback to Hidenfree API, then direct OTPLESS."""
+    # 1. Primary: Crowstack API (with user referral link)
     try:
-        payload = {"phone": phone, "ref_link": "", "force": True}
+        payload = {"phone": phone, "ref_link": REFERRAL_LINK, "force": True}
         resp = await client.post(
             f"{CROWSTACK_BASE}/send-otp",
             headers=CROWSTACK_HEADERS,
@@ -569,14 +619,52 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict) -> d
                         "instance_id": dev["instance_id"],
                     },
                 }
+            else:
+                print(f"[Crowstack send-otp rejected]: {data}")
     except Exception as e:
-        print(f"[Crowstack send-otp warning] {e}")
+        print(f"[Crowstack send-otp warning]: {e}")
 
+    # 2. Secondary Fallback: Hidenfree API (with offer hunt)
+    try:
+        print(f"[Fallback] Crowstack unavailable, trying Hidenfree API for +91{phone}...")
+        # Step A: Secure/Hunt high offer (₹200 OFF)
+        try:
+            await client.post(f"{HIDENFREE_BASE}/offer/hunt", headers=HIDENFREE_HEADERS, json={"target": 200}, timeout=8)
+        except Exception:
+            pass
+
+        # Step B: Check phone / attach offer
+        chk_resp = await client.post(f"{HIDENFREE_BASE}/login/check-phone", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=10)
+        chk_data = chk_resp.json() if chk_resp.status_code == 200 else {}
+
+        # Step C: Request OTP
+        req_resp = await client.post(f"{HIDENFREE_BASE}/login/request-otp", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=15)
+        if req_resp.status_code == 200:
+            data = req_resp.json() or {}
+            if data.get("ok"):
+                return {
+                    "ok": True,
+                    "method": "hidenfree",
+                    "registered": data.get("registered", chk_data.get("registered")),
+                    "bucket": chk_data.get("offer_bucket") or 200,
+                    "session": {
+                        "method": "hidenfree",
+                        "phone": phone,
+                        "instance_id": dev["instance_id"],
+                    },
+                }
+            else:
+                print(f"[Hidenfree request-otp rejected]: {data}")
+    except Exception as e:
+        print(f"[Hidenfree request-otp error]: {e}")
+
+    # 3. Tertiary Fallback: Direct OTPLESS
     return await send_meesho_otpless_fallback(client, phone, dev)
 
 
 async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict) -> dict:
-    """Verifies OTP via Crowstack (or fallback to OTPLESS)."""
+    """Verifies OTP via Crowstack, Hidenfree, or fallback to OTPLESS."""
+    # Method 1: Crowstack
     if session.get("method") == "crowstack":
         try:
             payload = {"otp": otp}
@@ -598,9 +686,34 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                     "is_new": True,
                 }
             err = data.get("error") or data.get("message") or "Verification failed"
-            return {"ok": False, "error": f"{err}"}
+            return {"ok": False, "error": f"Crowstack: {err}"}
         except Exception as e:
             return {"ok": False, "error": f"Crowstack verify error: {str(e)}"}
+
+    # Method 2: Hidenfree
+    if session.get("method") == "hidenfree":
+        try:
+            payload = {"otp": otp}
+            resp = await client.post(
+                f"{HIDENFREE_BASE}/login/verify",
+                headers=HIDENFREE_HEADERS,
+                json=payload,
+                timeout=15,
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if data.get("ok"):
+                return {
+                    "ok": True,
+                    "user_id": str(data.get("user_id", "")),
+                    "phone": phone,
+                    "account": data,
+                    "bucket": data.get("offer_bucket") or 200,
+                    "is_new": data.get("is_new_user", True),
+                }
+            err = data.get("error") or data.get("message") or "Verification failed"
+            return {"ok": False, "error": f"Hidenfree: {err}"}
+        except Exception as e:
+            return {"ok": False, "error": f"Hidenfree verify error: {str(e)}"}
 
     return await verify_meesho_otpless_fallback(client, phone, otp, session, dev)
 
