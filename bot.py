@@ -839,13 +839,109 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
     return await verify_meesho_otpless_fallback(client, phone, otp, session, dev)
 
 
+# ─── JSON Template System ─────────────────────────────────────────────────────
+DEFAULT_JSON_TEMPLATE = {
+    "mobile": "7500808645",
+    "user_id": 593576538,
+    "phone": "+917500808645",
+    "xo": "",
+    "ox": "",
+    "instance_id": "",
+    "gaid": "",
+    "identity": {
+        "instance_id": "",
+        "gaid": "",
+        "android_id": "5ada076fd13b1deb",
+        "media_id": "7e243fcf5491daa686dff23e8d724500e9bcbb52b18599fc0dd4a5da311ad921",
+        "app_session_id": "7354f6d9-a1c4-437f-a776-f191b44ec8cb",
+        "make": "Google",
+        "model": "Pixel 8a",
+        "build": "CP2A.260605.012",
+        "android": "15",
+        "dalvik_ua": "Dalvik/2.1.0 (Linux; U; Android 15; Pixel 8a Build/CP2A.260605.012) otplesssdk",
+        "connection_type": "MOBILE",
+        "carrier": "airtel",
+        "screen_width": 1080,
+        "screen_height": 2400,
+        "screen_dpi": 420,
+        "fcm_token": "tvBlQdCyAfe:APA91bHEpgWTdLgB1vaiLkHexQ9M0vpKkfkOxZAkDaz6h9ps7WRUyzpB64QLeOzYWKXHopJ8Yx2unXOq2xYZDJg3iQihPd0RwP5RzZMJZpCnHc00vh35aN44UBReqddaYWMIakeVJoFy",
+        "xff": "103.51.251.146",
+        "anon_xo": "eyJ0eXBlIjoiY29tcG9zaXRlIn0=.eyJqd3QiOiJleUpoYkdjaU9pSklVekkxTmlJc0ltaDBkSEJ6T2k4dmJXVmxjMmh2TG1OdmJTOXBjMjlmWTI5MWJuUnllVjlqYjJSbElqb2lTVTRpTENKb2RIUndjem92TDIxbFpYTm9ieTVqYjIwdmRtVnljMmx2YmlJNklqRWlMQ0owZVhBaU9pSktWMVFpZlEuZXlKbGVIQWlPakU1TkRZeE1qWXlNalFzSW1oMGRIQnpPaTh2YldWbGMyaHZMbU52YlM5aGJtOXVlVzF2ZFhOZmRYTmxjbDlwWkNJNklqSTNORFEwTXpRd0xXWTVOV1V0TkRSbVppMDROVGhpTFdObE9XRTNaVEJtTURZNU55SXNJbWgwZEhCek9pOHZiV1ZsYzJodkxtTnZiUzlwYm5OMFlXNWpaVjlwWkNJNkltRTNZekExTURFeU9EQTRPR1kzTWpFMk5HUXdZelF5WVRFMU1UZGxaV1JoSWl3aWFXRjBJam94TnpnNE5EUTJNakkwZlEuNWtxb01SVmNDRm85eFVWSVc5bnRXcnhLbWJLcmNjSzVoT3JXaVRtaHdLYyIsInhvIjoiIn0=",
+        "_referral_done": True,
+        "gender": "Male",
+        "age_group": "0-18"
+    }
+}
+
+
+def format_account_json(template: dict | None, phone: str, user_id: any, xo: str, ox: str, dev: dict) -> dict:
+    import copy
+    tmpl = copy.deepcopy(template) if template and isinstance(template, dict) else copy.deepcopy(DEFAULT_JSON_TEMPLATE)
+
+    uid_val = user_id
+    try:
+        if str(user_id).isdigit():
+            uid_val = int(user_id)
+    except Exception:
+        pass
+
+    inst_id = dev.get("instance_id") or str(uuid.uuid4())
+    gaid = dev.get("gaid") or str(uuid.uuid4())
+
+    if "mobile" in tmpl:
+        tmpl["mobile"] = str(phone)
+    else:
+        tmpl["mobile"] = str(phone)
+
+    if "phone" in tmpl:
+        tmpl["phone"] = f"+91{phone}"
+
+    if "user_id" in tmpl:
+        tmpl["user_id"] = uid_val
+    else:
+        tmpl["user_id"] = uid_val
+
+    if "xo" in tmpl:
+        tmpl["xo"] = xo
+    else:
+        tmpl["xo"] = xo
+
+    if "ox" in tmpl:
+        tmpl["ox"] = ox
+    else:
+        tmpl["ox"] = ox
+
+    if "instance_id" in tmpl:
+        tmpl["instance_id"] = inst_id
+    if "gaid" in tmpl:
+        tmpl["gaid"] = gaid
+
+    if "identity" in tmpl and isinstance(tmpl["identity"], dict):
+        ident = tmpl["identity"]
+        ident["instance_id"] = inst_id
+        ident["gaid"] = gaid
+        if dev.get("android_id"):
+            ident["android_id"] = dev["android_id"]
+        if dev.get("session_id"):
+            ident["app_session_id"] = dev["session_id"]
+    elif "identity" not in tmpl:
+        tmpl["identity"] = {
+            "instance_id": inst_id,
+            "gaid": gaid,
+            "android_id": dev.get("android_id", ""),
+            "app_session_id": dev.get("session_id", ""),
+        }
+
+    return tmpl
+
+
 # ─── Keyboards ────────────────────────────────────────────────────────────────
 MAIN_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": "🚀 Start Hunt"}, {"text": "📱 Check My Number"}],
         [{"text": "⚙️ Select Servers"}, {"text": "🔑 Set API Key"}],
-        [{"text": "📊 Stats"}, {"text": "💰 Balance"}],
-        [{"text": "🛑 Stop Hunt"}],
+        [{"text": "📝 Set JSON Format"}, {"text": "💰 Balance"}],
+        [{"text": "📊 Stats"}, {"text": "🛑 Stop Hunt"}],
     ],
     "resize_keyboard": True,
 }
@@ -1085,25 +1181,12 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             state["accounts_created"] += 1
             user_id = login_res.get("user_id")
 
-            account_data = {
-                "mobile": phone,
-                "user_id": user_id,
-                "account": login_res.get("account", {}),
-                "identity": {
-                    "instance_id": dev["instance_id"],
-                    "gaid": dev["gaid"],
-                },
-                "_meta": {
-                    "is_new": login_res.get("is_new", True),
-                    "is_first_order": True,
-                    "server_id": current_server,
-                    "bucket": login_res.get("bucket"),
-                },
-            }
-            if login_res.get("xo"):
-                account_data["xo"] = login_res.get("xo")
-            if login_res.get("ox"):
-                account_data["ox"] = login_res.get("ox")
+            xo = login_res.get("xo") or ""
+            ox = login_res.get("ox") or ""
+            cfg = get_user_config(chat_id)
+            user_tmpl = cfg.get("json_template")
+
+            account_data = format_account_json(user_tmpl, phone, user_id, xo, ox, dev)
 
             os.makedirs("accounts", exist_ok=True)
             fname = f"accounts/account_{phone}.json"
@@ -1269,25 +1352,12 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
         state["manual_phone"] = None
         user_id = login_res.get("user_id")
 
-        is_reg = state.get("is_registered", False)
-        account_data = {
-            "mobile": phone,
-            "user_id": user_id,
-            "account": login_res.get("account", {}),
-            "identity": {
-                "instance_id": dev["instance_id"],
-                "gaid": dev["gaid"],
-            },
-            "_meta": {
-                "is_new": False if is_reg else login_res.get("is_new", True),
-                "is_first_order": False if is_reg else True,
-                "bucket": login_res.get("bucket"),
-            },
-        }
-        if login_res.get("xo"):
-            account_data["xo"] = login_res.get("xo")
-        if login_res.get("ox"):
-            account_data["ox"] = login_res.get("ox")
+        xo = login_res.get("xo") or ""
+        ox = login_res.get("ox") or ""
+        cfg = get_user_config(chat_id)
+        user_tmpl = cfg.get("json_template")
+
+        account_data = format_account_json(user_tmpl, phone, user_id, xo, ox, dev)
 
         os.makedirs("accounts", exist_ok=True)
         fname = f"accounts/account_{phone}.json"
@@ -1362,23 +1432,26 @@ async def bot_loop():
                         await send_tg_message(client, chat_id, "✅ Main menu par aa gaye.", reply_markup=MAIN_MENU_KEYBOARD)
                         continue
 
-                    # ── /start or /help ──
+                     # ── /start or /help ──
                     if text.startswith("/start") or text.startswith("/help"):
                         cur_servers = cfg.get("selected_servers", ["5841"])
                         cur_key = (cfg.get("api_key") or "").strip()
                         masked_key = cur_key[:4] + "..." + cur_key[-4:] if len(cur_key) >= 8 else "❌ Not set (Click 🔑 Set API Key)"
+                        has_custom_json = "Custom Template Active" if cfg.get("json_template") else "Default Clean Format"
                         menu_text = (
                             f"👋 <b>Meesho Multi-Server Hunter Bot</b>\n\n"
                             f"⚙️ <b>Current Settings:</b>\n"
                             f"• <b>Active Servers (Max 2):</b> <code>{', '.join(cur_servers)}</code>\n"
-                            f"• <b>OTP Doctor API Key:</b> <code>{masked_key}</code>\n\n"
+                            f"• <b>OTP Doctor API Key:</b> <code>{masked_key}</code>\n"
+                            f"• <b>JSON Format:</b> <code>{has_custom_json}</code>\n\n"
                             f"📌 <b>Features:</b>\n"
                             f"1️⃣ <b>🚀 Start Hunt</b> — Dual servers se fresh number dhoondhkar auto login karke JSON export karta hai.\n"
                             f"2️⃣ <b>📱 Check My Number</b> — Apna number check karein, registered hone par bhi OTP bhejne ka option milega.\n"
                             f"3️⃣ <b>⚙️ Select Servers</b> — Max 2 servers choose karein ya naya server add karein.\n"
                             f"4️⃣ <b>🔑 Set API Key</b> — Apna personal OTP Doctor API Key save karein.\n"
-                            f"5️⃣ <b>💰 Balance</b> — Apne wallet ka balance check karein.\n"
-                            f"6️⃣ <b>🛑 Stop Hunt</b> — Hunting band karein."
+                            f"5️⃣ <b>📝 Set JSON Format</b> — Custom JSON format set karein ya JSON file bhejein (/setjson).\n"
+                            f"6️⃣ <b>💰 Balance</b> — Apne wallet ka balance check karein.\n"
+                            f"7️⃣ <b>🛑 Stop Hunt</b> — Hunting band karein."
                         )
                         await send_tg_message(client, chat_id, menu_text, reply_markup=MAIN_MENU_KEYBOARD)
 
@@ -1431,6 +1504,94 @@ async def bot_loop():
                                 client,
                                 chat_id,
                                 f"❌ <b>API Key Invalid!</b> Error: <code>{test_bal}</code>\nDobara sahi key bhejein ya /cancel karein.",
+                            )
+
+                    # ── 📝 Set JSON Format Template ──
+                    elif text.startswith("/setjson") or text == "📝 Set JSON Format":
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and parts[1].strip().startswith("{") and parts[1].strip().endswith("}"):
+                            try:
+                                parsed = json.loads(parts[1].strip())
+                                if not isinstance(parsed, dict):
+                                    raise ValueError("JSON must be a key-value object")
+                                update_user_config(chat_id, {"json_template": parsed})
+                                preview = json.dumps(parsed, indent=2)[:600]
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"✅ <b>Custom JSON Template Successfully Set!</b>\n\nAb se sabhi naye accounts iss template format mein export honge.\n\n<b>Template Preview:</b>\n<pre><code>{preview}</code></pre>",
+                                    reply_markup=MAIN_MENU_KEYBOARD,
+                                )
+                            except Exception as e:
+                                await send_tg_message(client, chat_id, f"❌ <b>Invalid JSON:</b> <code>{e}</code>\nKripya valid JSON bhejein.")
+                        else:
+                            state["manual_step"] = "awaiting_json_template"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            cur_tmpl = cfg.get("json_template") or DEFAULT_JSON_TEMPLATE
+                            cur_preview = json.dumps(cur_tmpl, indent=2)[:400]
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"📝 <b>Custom JSON Template Set Karein:</b>\n\n"
+                                f"Aap apna custom JSON format text message mein paste karein ya <code>.json</code> file upload karein.\n\n"
+                                f"<b>Active Template Preview:</b>\n<pre><code>{cur_preview}...</code></pre>\n\n"
+                                f"<i>Commands:</i>\n"
+                                f"• <b>/resetjson</b> — Reset to clean default\n"
+                                f"• <b>/viewjson</b> — View full active template",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif text == "/resetjson":
+                        update_user_config(chat_id, {"json_template": None})
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            "🔄 <b>JSON Template Reset to Default!</b> Ab clean default format use hoga.",
+                            reply_markup=MAIN_MENU_KEYBOARD,
+                        )
+
+                    elif text == "/viewjson":
+                        cur_tmpl = cfg.get("json_template") or DEFAULT_JSON_TEMPLATE
+                        cur_str = json.dumps(cur_tmpl, indent=2)
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            f"📋 <b>Active JSON Template:</b>\n<pre><code>{cur_str[:3800]}</code></pre>",
+                            reply_markup=MAIN_MENU_KEYBOARD,
+                        )
+
+                    elif state.get("manual_step") == "awaiting_json_template" or (msg.get("document") and msg["document"].get("file_name", "").endswith(".json")):
+                        content = text
+                        doc = msg.get("document")
+                        if doc and doc.get("file_id"):
+                            try:
+                                f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
+                                if f_res.status_code == 200:
+                                    f_path = f_res.json().get("result", {}).get("file_path")
+                                    if f_path:
+                                        dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
+                                        content = dl_res.text
+                            except Exception as e:
+                                print(f"[Doc Download Error] {e}")
+
+                        try:
+                            parsed = json.loads(content)
+                            if not isinstance(parsed, dict):
+                                raise ValueError("JSON must be a key-value dictionary object")
+                            update_user_config(chat_id, {"json_template": parsed})
+                            state["manual_step"] = None
+                            preview = json.dumps(parsed, indent=2)[:600]
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🎉 <b>Custom JSON Template Successfully Saved!</b>\n\nAb se sabhi naye accounts iss format mein export honge.\n\n<b>Preview:</b>\n<pre><code>{preview}</code></pre>",
+                                reply_markup=MAIN_MENU_KEYBOARD,
+                            )
+                        except Exception as e:
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"❌ <b>Invalid JSON Format:</b> <code>{e}</code>\n\nKripya valid JSON paste karein ya /cancel karein.",
                             )
 
                     # ── ⚙️ Select Servers (Max 2) ──
