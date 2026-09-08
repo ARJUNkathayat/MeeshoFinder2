@@ -935,13 +935,68 @@ def format_account_json(template: dict | None, phone: str, user_id: any, xo: str
     return tmpl
 
 
+def extract_json_credentials(data: dict) -> dict:
+    """Extracts phone, user_id, xo, ox, instance_id, gaid from any arbitrary Meesho JSON structure."""
+    res = {
+        "phone": "",
+        "user_id": "",
+        "xo": "",
+        "ox": "",
+        "instance_id": "",
+        "gaid": "",
+        "android_id": "",
+        "app_session_id": "",
+    }
+
+    def search_keys(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                k_low = str(k).lower().replace("_", "").replace("-", "")
+                if not res["phone"] and k_low in ("mobile", "phone", "phonenumber", "number", "mobileno"):
+                    if isinstance(v, (str, int)):
+                        cleaned = clean_phone(str(v))
+                        if len(cleaned) == 10:
+                            res["phone"] = cleaned
+                if not res["user_id"] and k_low in ("userid", "uid", "id", "merchantuserid"):
+                    if isinstance(v, (str, int)) and str(v).isdigit() and len(str(v)) >= 4:
+                        res["user_id"] = str(v)
+                if not res["xo"] and k_low in ("xo", "token", "xotoken", "jwt"):
+                    if isinstance(v, str) and len(v) > 20:
+                        res["xo"] = v
+                if not res["ox"] and k_low in ("ox", "refreshtoken", "oxtoken"):
+                    if isinstance(v, str) and len(v) > 10:
+                        res["ox"] = v
+                if not res["instance_id"] and k_low in ("instanceid", "instance"):
+                    if isinstance(v, str) and len(v) >= 16:
+                        res["instance_id"] = v
+                if not res["gaid"] and k_low in ("gaid", "adid", "googleadid"):
+                    if isinstance(v, str) and len(v) >= 16:
+                        res["gaid"] = v
+                if not res["android_id"] and k_low in ("androidid", "aid"):
+                    if isinstance(v, str) and len(v) >= 10:
+                        res["android_id"] = v
+                if not res["app_session_id"] and k_low in ("appsessionid", "sessionid"):
+                    if isinstance(v, str) and len(v) >= 16:
+                        res["app_session_id"] = v
+
+                if isinstance(v, (dict, list)):
+                    search_keys(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                search_keys(item)
+
+    search_keys(data)
+    return res
+
+
 # ─── Keyboards ────────────────────────────────────────────────────────────────
 MAIN_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": "🚀 Start Hunt"}, {"text": "📱 Check My Number"}],
         [{"text": "⚙️ Select Servers"}, {"text": "🔑 Set API Key"}],
-        [{"text": "📝 Set JSON Format"}, {"text": "💰 Balance"}],
-        [{"text": "📊 Stats"}, {"text": "🛑 Stop Hunt"}],
+        [{"text": "📝 Set JSON Format"}, {"text": "🔄 Convert JSON"}],
+        [{"text": "📊 Stats"}, {"text": "💰 Balance"}],
+        [{"text": "🛑 Stop Hunt"}],
     ],
     "resize_keyboard": True,
 }
@@ -1387,6 +1442,64 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
         await send_tg_message(client, chat_id, f"❌ <b>OTP Wrong ya Expired:</b> <code>{err_msg}</code>\n\nDobara OTP daalein ya cancel karne ke liye /cancel bhejein.")
 
 
+async def convert_and_send_json(client: httpx.AsyncClient, chat_id: int | str, content: str):
+    cfg = get_user_config(chat_id)
+    user_tmpl = cfg.get("json_template")
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], dict):
+            target_item = parsed[0]
+        elif isinstance(parsed, dict):
+            target_item = parsed
+        else:
+            raise ValueError("JSON must contain an object")
+
+        extracted = extract_json_credentials(target_item)
+        phone = extracted["phone"] or "0000000000"
+        user_id = extracted["user_id"] or "0"
+        xo = extracted["xo"] or ""
+        ox = extracted["ox"] or ""
+
+        dev = mk_device()
+        if extracted.get("instance_id"):
+            dev["instance_id"] = extracted["instance_id"]
+        if extracted.get("gaid"):
+            dev["gaid"] = extracted["gaid"]
+        if extracted.get("android_id"):
+            dev["android_id"] = extracted["android_id"]
+        if extracted.get("app_session_id"):
+            dev["session_id"] = extracted["app_session_id"]
+
+        formatted = format_account_json(user_tmpl, phone, user_id, xo, ox, dev)
+        json_str = json.dumps(formatted, indent=2, ensure_ascii=False)
+
+        await send_tg_message(
+            client,
+            chat_id,
+            f"🎉 <b>JSON Successfully Converted & Formatted!</b>\n\n"
+            f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
+            f"👤 <b>User ID:</b> <code>{user_id}</code>\n\n"
+            f"📋 <b>New Formatted JSON:</b>\n"
+            f"<pre><code>{json_str}</code></pre>",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+
+        await send_tg_document(
+            client,
+            chat_id,
+            filename=f"converted_{phone}.json",
+            content=json_str,
+            caption=f"✅ Converted Meesho Account: +91{phone}",
+        )
+    except Exception as e:
+        await send_tg_message(
+            client,
+            chat_id,
+            f"❌ <b>JSON Conversion Failed:</b> <code>{str(e)}</code>\n\nKripya valid Meesho JSON bhejein.",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+
+
 # ─── Telegram Bot Polling Loop ────────────────────────────────────────────────
 async def bot_loop():
     print("🤖 Multi-Server Meesho Bot Started! (@BotFather verified)")
@@ -1449,9 +1562,10 @@ async def bot_loop():
                             f"2️⃣ <b>📱 Check My Number</b> — Apna number check karein, registered hone par bhi OTP bhejne ka option milega.\n"
                             f"3️⃣ <b>⚙️ Select Servers</b> — Max 2 servers choose karein ya naya server add karein.\n"
                             f"4️⃣ <b>🔑 Set API Key</b> — Apna personal OTP Doctor API Key save karein.\n"
-                            f"5️⃣ <b>📝 Set JSON Format</b> — Custom JSON format set karein ya JSON file bhejein (/setjson).\n"
-                            f"6️⃣ <b>💰 Balance</b> — Apne wallet ka balance check karein.\n"
-                            f"7️⃣ <b>🛑 Stop Hunt</b> — Hunting band karein."
+                            f"5️⃣ <b>📝 Set JSON Format</b> — Custom JSON format set karein (/setjson).\n"
+                            f"6️⃣ <b>🔄 Convert JSON</b> — Kisi bhi dusre format ke JSON ko template format mein convert karein (/convertjson).\n"
+                            f"7️⃣ <b>💰 Balance</b> — Apne wallet ka balance check karein.\n"
+                            f"8️⃣ <b>🛑 Stop Hunt</b> — Hunting band karein."
                         )
                         await send_tg_message(client, chat_id, menu_text, reply_markup=MAIN_MENU_KEYBOARD)
 
@@ -1560,7 +1674,7 @@ async def bot_loop():
                             reply_markup=MAIN_MENU_KEYBOARD,
                         )
 
-                    elif state.get("manual_step") == "awaiting_json_template" or (msg.get("document") and msg["document"].get("file_name", "").endswith(".json")):
+                    elif state.get("manual_step") == "awaiting_json_template":
                         content = text
                         doc = msg.get("document")
                         if doc and doc.get("file_id"):
@@ -1593,6 +1707,40 @@ async def bot_loop():
                                 chat_id,
                                 f"❌ <b>Invalid JSON Format:</b> <code>{e}</code>\n\nKripya valid JSON paste karein ya /cancel karein.",
                             )
+
+                    # ── 🔄 Convert Arbitrary / Old JSON ──
+                    elif text.startswith("/convertjson") or text.startswith("/convert") or text.startswith("/fixjson") or text == "🔄 Convert JSON":
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and parts[1].strip().startswith("{") and parts[1].strip().endswith("}"):
+                            await convert_and_send_json(client, chat_id, parts[1].strip())
+                        else:
+                            state["manual_step"] = "awaiting_convert_json"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "🔄 <b>JSON Converter / Reformatter:</b>\n\n"
+                                "Aap apna kisi bhi dusre ya purane format ka Meesho JSON text message mein paste karein ya <code>.json</code> file upload karein.\n\n"
+                                "Bot usme se <code>phone</code>, <code>user_id</code>, <code>xo</code>, <code>ox</code>, <code>identity</code> extract karke aapke active JSON template format mein naya JSON file bana dega!",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_convert_json" or (msg.get("document") and msg["document"].get("file_name", "").endswith(".json")):
+                        content = text
+                        doc = msg.get("document")
+                        if doc and doc.get("file_id"):
+                            try:
+                                f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
+                                if f_res.status_code == 200:
+                                    f_path = f_res.json().get("result", {}).get("file_path")
+                                    if f_path:
+                                        dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
+                                        content = dl_res.text
+                            except Exception as e:
+                                print(f"[Doc Download Error] {e}")
+
+                        state["manual_step"] = None
+                        await convert_and_send_json(client, chat_id, content)
 
                     # ── ⚙️ Select Servers (Max 2) ──
                     elif text.startswith("/servers") or text == "⚙️ Select Servers":
