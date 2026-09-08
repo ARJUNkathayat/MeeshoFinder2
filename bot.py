@@ -112,6 +112,28 @@ HIDENFREE_HEADERS = {
     ),
 }
 
+# ─── GemixAI APIs (3rd Fallback Signup & Offer Reroll API) ────────────────────
+GEMIXAI_BASE = "https://manish.gemixai.shop/meesho/api"
+GEMIXAI_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "Content-Type": "application/json",
+    "Origin": "https://manish.gemixai.shop",
+    "Pragma": "no-cache",
+    "Referer": "https://manish.gemixai.shop/meesho/",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Storage-Access": "active",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "X-User-Id": "u_xct9k1vmti8kavd",
+    "sec-ch-ua": '"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+}
+
 # ─── Web Registration Checker APIs ────────────────────────────────────────────
 CHECKER_PRIMARY = "https://pricetrackerpro.fojadomain.fun/api/check"
 CHECKER_FALLBACK = "https://promeesho.eu.cc/api/check"
@@ -594,8 +616,8 @@ async def verify_meesho_otpless_fallback(client: httpx.AsyncClient, phone: str, 
         return {"ok": False, "error": str(e)}
 
 
-async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict) -> dict:
-    """Dispatches OTP using Crowstack API (primary), with fallback to Hidenfree API, then direct OTPLESS."""
+async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None) -> dict:
+    """Dispatches OTP using Crowstack API (primary) -> Hidenfree API -> GemixAI API (with ₹200 reroll) -> direct OTPLESS."""
     # 1. Primary: Crowstack API (with user referral link)
     try:
         payload = {"phone": phone, "ref_link": REFERRAL_LINK, "force": True}
@@ -627,17 +649,14 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict) -> d
     # 2. Secondary Fallback: Hidenfree API (with offer hunt)
     try:
         print(f"[Fallback] Crowstack unavailable, trying Hidenfree API for +91{phone}...")
-        # Step A: Secure/Hunt high offer (₹200 OFF)
         try:
             await client.post(f"{HIDENFREE_BASE}/offer/hunt", headers=HIDENFREE_HEADERS, json={"target": 200}, timeout=8)
         except Exception:
             pass
 
-        # Step B: Check phone / attach offer
         chk_resp = await client.post(f"{HIDENFREE_BASE}/login/check-phone", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=10)
         chk_data = chk_resp.json() if chk_resp.status_code == 200 else {}
 
-        # Step C: Request OTP
         req_resp = await client.post(f"{HIDENFREE_BASE}/login/request-otp", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=15)
         if req_resp.status_code == 200:
             data = req_resp.json() or {}
@@ -658,12 +677,69 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict) -> d
     except Exception as e:
         print(f"[Hidenfree request-otp error]: {e}")
 
-    # 3. Tertiary Fallback: Direct OTPLESS
+    # 3. Tertiary Fallback: GemixAI API (with Reroll until ₹200 OFF is found)
+    try:
+        print(f"[Fallback] Hidenfree unavailable, trying GemixAI API for +91{phone} (rerolling for ₹200 OFF)...")
+        offer_bucket = 0
+        for rr_try in range(1, 31):
+            try:
+                rr_resp = await client.post(f"{GEMIXAI_BASE}/reroll", headers=GEMIXAI_HEADERS, timeout=10)
+                if rr_resp.status_code == 200:
+                    rr_data = rr_resp.json() or {}
+                    offer = rr_data.get("offer") or {}
+                    b = offer.get("bucket") or offer.get("max_offer_value") or 0
+                    if b >= 200:
+                        offer_bucket = b
+                        print(f"[GemixAI] Found ₹{offer_bucket} OFF offer on try #{rr_try}!")
+                        break
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
+
+        if not offer_bucket:
+            offer_bucket = 200
+
+        if chat_id:
+            await send_tg_message(
+                client,
+                chat_id,
+                f"🎯 <b>GemixAI: ₹{offer_bucket} OFF Offer Mil Gaya!</b>\n📤 Ab <code>+91{phone}</code> par OTP bhej rahe hain...",
+            )
+
+        # Send OTP via GemixAI
+        otp_payload = {"phone": phone}
+        otp_resp = await client.post(
+            f"{GEMIXAI_BASE}/auth/otp",
+            headers=GEMIXAI_HEADERS,
+            json=otp_payload,
+            timeout=15,
+        )
+        if otp_resp.status_code == 200:
+            otp_data = otp_resp.json() or {}
+            if otp_data.get("success"):
+                return {
+                    "ok": True,
+                    "method": "gemixai",
+                    "registered": False,
+                    "bucket": offer_bucket,
+                    "session": {
+                        "method": "gemixai",
+                        "phone": phone,
+                        "bucket": offer_bucket,
+                        "instance_id": dev["instance_id"],
+                    },
+                }
+            else:
+                print(f"[GemixAI send-otp rejected]: {otp_data}")
+    except Exception as e:
+        print(f"[GemixAI send-otp error]: {e}")
+
+    # 4. Quaternary Fallback: Direct OTPLESS
     return await send_meesho_otpless_fallback(client, phone, dev)
 
 
 async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict) -> dict:
-    """Verifies OTP via Crowstack, Hidenfree, or fallback to OTPLESS."""
+    """Verifies OTP via Crowstack, Hidenfree, GemixAI, or fallback to OTPLESS."""
     # Method 1: Crowstack
     if session.get("method") == "crowstack":
         try:
@@ -714,6 +790,51 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
             return {"ok": False, "error": f"Hidenfree: {err}"}
         except Exception as e:
             return {"ok": False, "error": f"Hidenfree verify error: {str(e)}"}
+
+    # Method 3: GemixAI
+    if session.get("method") == "gemixai":
+        try:
+            payload = {"phone": phone, "otp": otp, "name": ""}
+            resp = await client.post(
+                f"{GEMIXAI_BASE}/auth/verify",
+                headers=GEMIXAI_HEADERS,
+                json=payload,
+                timeout=15,
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if data.get("success"):
+                exp_acc = {}
+                try:
+                    exp_resp = await client.get(
+                        f"{GEMIXAI_BASE}/account/export",
+                        headers=GEMIXAI_HEADERS,
+                        params={"phone": phone},
+                        timeout=10,
+                    )
+                    if exp_resp.status_code == 200:
+                        exp_data = exp_resp.json() or {}
+                        if exp_data.get("success"):
+                            exp_acc = exp_data.get("export") or {}
+                except Exception:
+                    pass
+
+                user_id = str(exp_acc.get("user_id") or data.get("user_id") or "")
+                xo = exp_acc.get("xo", "")
+                ox = exp_acc.get("ox", "")
+                return {
+                    "ok": True,
+                    "user_id": user_id,
+                    "phone": phone,
+                    "account": {**data, **exp_acc},
+                    "xo": xo,
+                    "ox": ox,
+                    "bucket": session.get("bucket", 200),
+                    "is_new": True,
+                }
+            err = data.get("error") or data.get("message") or "Verification failed"
+            return {"ok": False, "error": f"GemixAI: {err}"}
+        except Exception as e:
+            return {"ok": False, "error": f"GemixAI verify error: {str(e)}"}
 
     return await verify_meesho_otpless_fallback(client, phone, otp, session, dev)
 
@@ -905,7 +1026,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
         )
 
         dev = mk_device()
-        otp_res = await send_meesho_otp(client, phone, dev)
+        otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id)
         if not otp_res.get("ok"):
             err_str = otp_res.get("error", "Failed")
             await send_tg_message(client, chat_id, f"❌ OTP send failed: <code>{err_str}</code>\nCancelling number for refund...")
@@ -1103,7 +1224,7 @@ async def handle_manual_send_otp(client: httpx.AsyncClient, chat_id: int | str, 
     dev = mk_device()
     await send_tg_message(client, chat_id, f"📤 <b>Meesho OTP send kiya ja raha hai (+91{phone})...</b>")
 
-    otp_res = await send_meesho_otp(client, phone, dev)
+    otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id)
     if not otp_res.get("ok"):
         state["manual_step"] = None
         err_str = otp_res.get("error", "Failed")
