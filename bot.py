@@ -27,6 +27,9 @@ import uuid
 import random
 import secrets
 import base64
+import io
+import urllib.parse
+import qrcode
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -200,7 +203,17 @@ KNOWN_SERVERS = {
 }
 
 USER_CONFIGS_FILE = "user_configs.json"
+STORE_SETTINGS_FILE = "store_settings.json"
+ORDERS_DB_FILE = "orders_db.json"
 ACTIVE_TASKS = {}
+
+DEFAULT_STORE_SETTINGS = {
+    "meesho_price": int(os.getenv("MEESHO_PRICE", "99")),
+    "upi_id": os.getenv("UPI_ID", "paytmqr28100505010115i3puxb4eoa@paytm").strip(),
+    "upi_name": os.getenv("UPI_NAME", "Meesho JSON Store").strip(),
+    "admin_username": os.getenv("ADMIN_USERNAME", "shivamthakur01").strip().lstrip("@"),
+    "support_text": os.getenv("SUPPORT_TEXT", "Admin se baat karne ke liye yahan contact karein: @shivamthakur01"),
+}
 
 
 # ─── Persistent User Settings Storage ─────────────────────────────────────────
@@ -246,6 +259,92 @@ def update_user_config(chat_id: int | str, updates: dict):
     cur.update(updates)
     configs[cid] = cur
     save_all_configs(configs)
+
+
+# ─── Persistent Store & Order Storage ─────────────────────────────────────────
+def load_store_settings() -> dict:
+    settings = dict(DEFAULT_STORE_SETTINGS)
+    if os.path.exists(STORE_SETTINGS_FILE):
+        try:
+            with open(STORE_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                settings.update(json.load(f))
+        except Exception:
+            pass
+    return settings
+
+
+def save_store_settings(settings: dict):
+    try:
+        with open(STORE_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[StoreSettings Save Error] {e}")
+
+
+def get_store_price() -> int:
+    return int(load_store_settings().get("meesho_price", 99))
+
+
+def update_store_price(new_price: int):
+    st = load_store_settings()
+    st["meesho_price"] = int(new_price)
+    save_store_settings(st)
+
+
+def load_orders() -> dict:
+    if os.path.exists(ORDERS_DB_FILE):
+        try:
+            with open(ORDERS_DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_order(order: dict):
+    orders = load_orders()
+    orders[str(order["id"])] = order
+    try:
+        with open(ORDERS_DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(orders, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Orders Save Error] {e}")
+
+
+def get_order(order_id: str) -> dict | None:
+    orders = load_orders()
+    return orders.get(str(order_id))
+
+
+def get_user_orders(user_id: int | str) -> list:
+    orders = load_orders()
+    uid = str(user_id)
+    return [ord for ord in orders.values() if str(ord.get("user_id")) == uid]
+
+
+def is_admin(chat_id: int | str) -> bool:
+    cid = str(chat_id).strip()
+    admin_ids = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else []
+    extra_admins = [x.strip() for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+    admin_ids.extend(extra_admins)
+    return cid in admin_ids
+
+
+def generate_upi_qr_bytes(upi_id: str, upi_name: str, amount: float | int, order_id: str) -> bytes:
+    upi_url = f"upi://pay?pa={upi_id}&pn={urllib.parse.quote(upi_name)}&am={amount}&cu=INR&tn={urllib.parse.quote(f'Order {order_id}')}"
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(upi_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = io.BytesIO()
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio.getvalue()
 
 
 # ─── Health Server for Render / Cloud ─────────────────────────────────────────
@@ -356,12 +455,39 @@ async def send_tg_document(client: httpx.AsyncClient, chat_id: int | str, filena
     if isinstance(content, str):
         content = content.encode("utf-8")
     files = {"document": (filename, content, "application/json")}
-    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    data = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
     try:
         r = await client.post(url, data=data, files=files, timeout=25.0)
         return r.json()
     except Exception as e:
         print(f"[TG Error] send_tg_document: {e}")
+        return None
+
+
+async def send_tg_photo(client: httpx.AsyncClient, chat_id: int | str, photo_bytes: bytes, caption: str = "", reply_markup=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    files = {"photo": ("qrcode.png", photo_bytes, "image/png")}
+    data = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup) if isinstance(reply_markup, dict) else reply_markup
+    try:
+        r = await client.post(url, data=data, files=files, timeout=25.0)
+        return r.json()
+    except Exception as e:
+        print(f"[TG Error] send_tg_photo: {e}")
+        return None
+
+
+async def answer_tg_callback(client: httpx.AsyncClient, callback_query_id: str, text: str = None, show_alert: bool = False):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id, "show_alert": show_alert}
+    if text:
+        payload["text"] = text
+    try:
+        r = await client.post(url, json=payload, timeout=10.0)
+        return r.json()
+    except Exception as e:
+        print(f"[TG Error] answer_tg_callback: {e}")
         return None
 
 
@@ -989,17 +1115,388 @@ def extract_json_credentials(data: dict) -> dict:
     return res
 
 
+def sync_to_sell_store(account_data: dict, phone: str) -> dict:
+    """
+    Automatically syncs newly mined Meesho account JSON to TelegramBotSell's stock pool:
+    1. Writes to MongoDB collection 'products' (if MONGO_URI is set)
+    2. Writes to local 'data/store.json'
+    """
+    possible_paths = [
+        os.getenv("TELEGRAM_SELL_STORE_PATH", ""),
+        r"D:\TelegramBotSell\data\store.json",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "TelegramBotSell", "data", "store.json")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "TelegramBotSell", "data", "store.json")),
+        os.path.abspath(os.path.join(os.getcwd(), "..", "TelegramBotSell", "data", "store.json")),
+    ]
+
+    store_path = None
+    for p in possible_paths:
+        if p and os.path.exists(p):
+            store_path = p
+            break
+
+    # Check MongoDB URI directly or from env
+    mongo_uri = os.getenv("MONGO_URI", "mongodb+srv://karankathayat2005_db_user:k4snumCsazWYdemd@telegramsellingbotdb.b5zxeml.mongodb.net/?appName=TelegramSellingBotDb").strip()
+    mongo_dbname = os.getenv("MONGO_DB_NAME", "telegram_store").strip()
+
+    json_item_str = json.dumps(account_data, indent=2, ensure_ascii=False) if isinstance(account_data, dict) else str(account_data)
+    total_stock = 1
+
+    # 1. MongoDB Direct Sync (if configured)
+    if mongo_uri:
+        try:
+            from pymongo import MongoClient
+            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=4000)
+            db = client[mongo_dbname]
+            
+            # Find Meesho product
+            prod = db.products.find_one({"categoryId": "cat_1788793927977", "type": "stock_pool"})
+            if not prod:
+                prod = db.products.find_one({"type": "stock_pool", "name": {"$regex": "meesho", "$options": "i"}})
+
+            if prod:
+                items = prod.get("stockItems", [])
+                if not any(f'"mobile": "{phone}"' in it or f'"{phone}"' in it for it in items):
+                    db.products.update_one(
+                        {"_id": prod["_id"]},
+                        {"$push": {"stockItems": json_item_str}}
+                    )
+                    total_stock = len(items) + 1
+                    print(f"[SellStoreSync] 🍃 MongoDB Synced: Account +91{phone} added to collection 'products'.")
+                else:
+                    total_stock = len(items)
+            else:
+                new_prod = {
+                    "id": "prod_1788793928009",
+                    "categoryId": "cat_1788793927977",
+                    "name": "Meesho Fresh Account JSON",
+                    "description": "⚡ 100% Fresh Unregistered Meesho Account with Session Tokens & Device ID. Instant automated delivery upon payment.",
+                    "price": 99,
+                    "type": "stock_pool",
+                    "stockItems": [json_item_str],
+                    "fileId": None,
+                    "fileName": None,
+                    "staticContent": None,
+                    "isUnlimited": False,
+                    "isActive": True,
+                    "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                db.products.insert_one(new_prod)
+                print(f"[SellStoreSync] 🍃 MongoDB Created product & added Account +91{phone}.")
+        except Exception as mongo_err:
+            print(f"[SellStoreSync] ⚠️ MongoDB sync warning (falling back to JSON file): {mongo_err}")
+
+    # 2. Local JSON File Sync
+    if not store_path:
+        return {"ok": True, "stock": total_stock}
+
+    try:
+        with open(store_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if "categories" not in data or not isinstance(data["categories"], list):
+            data["categories"] = []
+        if "products" not in data or not isinstance(data["products"], list):
+            data["products"] = []
+
+        meesho_cat = None
+        for cat in data["categories"]:
+            if "meesho" in cat.get("name", "").lower() or cat.get("id") == "cat_1788793927977":
+                meesho_cat = cat
+                break
+
+        if not meesho_cat:
+            meesho_cat = {
+                "id": "cat_1788793927977",
+                "name": "🛍️ Meesho Fresh JSONs",
+                "description": "Freshly mined & verified Meesho Accounts with Token/Session for instant login",
+                "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            data["categories"].append(meesho_cat)
+
+        meesho_prod = None
+        for prod in data["products"]:
+            if prod.get("categoryId") == meesho_cat["id"] and prod.get("type") == "stock_pool":
+                meesho_prod = prod
+                break
+
+        if not meesho_prod:
+            meesho_prod = {
+                "id": "prod_1788793928009",
+                "categoryId": meesho_cat["id"],
+                "name": "Meesho Fresh Account JSON",
+                "description": "⚡ 100% Fresh Unregistered Meesho Account with Session Tokens & Device ID. Instant automated delivery upon payment.",
+                "price": 99,
+                "type": "stock_pool",
+                "stockItems": [],
+                "fileId": None,
+                "fileName": None,
+                "staticContent": None,
+                "isUnlimited": False,
+                "isActive": True,
+                "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            data["products"].append(meesho_prod)
+
+        if "stockItems" not in meesho_prod or not isinstance(meesho_prod["stockItems"], list):
+            meesho_prod["stockItems"] = []
+
+        if not any(f'"mobile": "{phone}"' in item or f'"{phone}"' in item for item in meesho_prod["stockItems"]):
+            meesho_prod["stockItems"].append(json_item_str)
+
+            tmp_file = store_path + f".tmp.{os.getpid()}"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_file, store_path)
+
+            stock_count = len(meesho_prod["stockItems"])
+            print(f"[SellStoreSync] ✅ Successfully added Meesho JSON (+91{phone}) to TelegramBotSell stock! (Total Stock: {stock_count})")
+            return {"ok": True, "stock": stock_count, "store_path": store_path}
+        else:
+            stock_count = len(meesho_prod["stockItems"])
+            return {"ok": True, "stock": stock_count, "store_path": store_path}
+
+    except Exception as e:
+        print(f"[SellStoreSync] ⚠️ Error syncing to TelegramBotSell store: {e}")
+        return {"ok": True, "stock": total_stock}
+
+
 # ─── Keyboards ────────────────────────────────────────────────────────────────
-MAIN_MENU_KEYBOARD = {
+ADMIN_MAIN_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": "🚀 Start Hunt"}, {"text": "📱 Check My Number"}],
         [{"text": "⚙️ Select Servers"}, {"text": "🔑 Set API Key"}],
         [{"text": "📝 Set JSON Format"}, {"text": "🔄 Convert JSON"}],
         [{"text": "📊 Stats"}, {"text": "💰 Balance"}],
+        [{"text": "💰 Set JSON Price"}, {"text": "📦 View Orders"}],
         [{"text": "🛑 Stop Hunt"}],
     ],
     "resize_keyboard": True,
 }
+
+USER_MAIN_MENU_KEYBOARD = {
+    "keyboard": [
+        [{"text": "🛍️ Buy Meesho JSON"}],
+        [{"text": "📦 My Orders"}, {"text": "💬 Contact Admin"}],
+        [{"text": "ℹ️ How It Works"}],
+    ],
+    "resize_keyboard": True,
+}
+
+MAIN_MENU_KEYBOARD = ADMIN_MAIN_MENU_KEYBOARD
+
+
+# ─── Automated Order Mining & Admin Delivery Task ─────────────────────────────
+async def mine_and_deliver_order(client: httpx.AsyncClient, order_id: str):
+    order = get_order(order_id)
+    if not order:
+        print(f"[OrderDelivery] ❌ Order {order_id} not found in DB.")
+        return
+
+    buyer_id = str(order.get("user_id"))
+    order["status"] = "PROCESSING"
+    save_order(order)
+
+    # 1. Initial Live Update to Buyer
+    await send_tg_message(
+        client,
+        buyer_id,
+        f"⚡ <b>MEESHO ACCOUNT GENERATION INITIATED</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+        f"⏳ <b>Status:</b> <code>[▓▓░░░░░░░░] 20% (Searching)</code>\n\n"
+        f"🔍 <i>Searching fresh unregistered number on fast servers...</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+    )
+
+    admin_cfg = get_user_config(ADMIN_CHAT_ID)
+    api_key = (admin_cfg.get("api_key") or DEFAULT_OTP_DOCTOR_KEY).strip()
+    servers = admin_cfg.get("selected_servers", ["5841"])
+    if not servers:
+        servers = ["5841"]
+
+    delivered_phone = None
+    account_json_str = None
+    max_attempts = 8
+
+    for attempt in range(1, max_attempts + 1):
+        srv = servers[(attempt - 1) % len(servers)]
+        print(f"[OrderDelivery] Attempt #{attempt} for Order {order_id} on Server {srv}...")
+
+        res = await otpd_buy(client, api_key, srv)
+        if not res.get("ok"):
+            print(f"[OrderDelivery] Buy failed on {srv}: {res.get('error')}")
+            await asyncio.sleep(4)
+            continue
+
+        act_id = res["id"]
+        phone = res["phone"]
+
+        chk = await check_meesho_reg(client, phone)
+        if not chk.get("ok"):
+            await asyncio.sleep(2)
+            chk = await check_meesho_reg(client, phone)
+
+        if chk.get("registered") is True or not chk.get("ok"):
+            print(f"[OrderDelivery] Phone {phone} is registered or check failed. Cancelling...")
+            await otpd_cancel(client, api_key, act_id)
+            await asyncio.sleep(4)
+            continue
+
+        # 2. Buyer Live Progress: Fresh number found & OTP dispatched
+        masked_num = f"{phone[:3]}XXXX{phone[-3:]}"
+        await send_tg_message(
+            client,
+            buyer_id,
+            f"📱 <b>FRESH NUMBER ACQUIRED!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📞 <b>Allocated Mobile:</b> <code>+91 {masked_num}</code>\n"
+            f"⏳ <b>Status:</b> <code>[▓▓▓▓▓░░░░░] 50% (OTP Sent)</code>\n\n"
+            f"📩 <i>Sending official Meesho Login OTP via SMS...</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+        )
+
+        dev = mk_device()
+        otp_res = await send_meesho_otp(client, phone, dev, chat_id=ADMIN_CHAT_ID)
+        if not otp_res.get("ok"):
+            print(f"[OrderDelivery] OTP send failed: {otp_res.get('error')}. Cancelling...")
+            await otpd_cancel(client, api_key, act_id)
+            await asyncio.sleep(4)
+            continue
+
+        session_dict = otp_res["session"]
+        start_wait = time.time()
+        otp_code = None
+
+        while (time.time() - start_wait) < 150:
+            sms_res = await otpd_get_sms(client, api_key, act_id)
+            if sms_res.get("ok"):
+                sms_text = sms_res.get("sms", "")
+                digits = re.findall(r"\b\d{4,6}\b", sms_text)
+                if digits:
+                    otp_code = digits[0]
+                    # 3. Buyer Live Progress: OTP received & logging in
+                    await send_tg_message(
+                        client,
+                        buyer_id,
+                        f"🔑 <b>SMS OTP RECEIVED & VERIFIED!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🔐 <b>Verification:</b> <code>OTP 6-Digit Verified ✅</code>\n"
+                        f"⏳ <b>Status:</b> <code>[▓▓▓▓▓▓▓▓░░] 85% (Logging in)</code>\n\n"
+                        f"⚙️ <i>Generating Meesho session tokens & auth cookies...</i>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+                    )
+                    break
+            await asyncio.sleep(3)
+
+        if not otp_code:
+            print(f"[OrderDelivery] SMS timeout for {phone}. Cancelling...")
+            await otpd_cancel(client, api_key, act_id)
+            await asyncio.sleep(4)
+            continue
+
+        login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev)
+        if login_res.get("ok"):
+            user_id = login_res.get("user_id")
+            xo = login_res.get("xo") or ""
+            ox = login_res.get("ox") or ""
+            tmpl = admin_cfg.get("json_template")
+            account_data = format_account_json(tmpl, phone, user_id, xo, ox, dev)
+
+            os.makedirs("accounts", exist_ok=True)
+            fname = f"accounts/account_{phone}.json"
+            account_json_str = json.dumps(account_data, indent=2, ensure_ascii=False)
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write(account_json_str)
+
+            delivered_phone = phone
+            break
+        else:
+            print(f"[OrderDelivery] Meesho login failed for {phone}: {login_res.get('error')}")
+            await otpd_cancel(client, api_key, act_id)
+            await asyncio.sleep(4)
+
+    if delivered_phone and account_json_str:
+        order["status"] = "READY_FOR_DELIVERY"
+        order["mined_phone"] = delivered_phone
+        order["mined_json"] = account_json_str
+        order["mined_at"] = time.time()
+        save_order(order)
+
+        # 4. Buyer Notification: Account created successfully, waiting for admin delivery
+        masked_final = f"{delivered_phone[:3]}XXXX{delivered_phone[-3:]}"
+        user_created_msg = (
+            f"🎉 <b>MEESHO ACCOUNT CREATED SUCCESSFULLY! ✅</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+            f"📱 <b>Account Mobile:</b> <code>+91 {masked_final}</code>\n"
+            f"⏳ <b>Status:</b> <code>[▓▓▓▓▓▓▓▓▓▓] 100% (Complete)</code>\n\n"
+            f"🛡️ <b>Admin final quality check kar rahe hain.</b>\n"
+            f"📦 Aapka complete JSON file order thodi der mein isi chat mein deliver ho jayega.\n"
+            f"⏳ <i>Please wait a few moments!</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        await send_tg_message(client, buyer_id, user_created_msg, reply_markup=USER_MAIN_MENU_KEYBOARD)
+
+        # 5. Send Mined Account DIRECTLY TO ADMIN with Delivery Actions
+        if ADMIN_CHAT_ID:
+            admin_delivery_msg = (
+                f"🔔 <b>MEESHO ACCOUNT MINED & READY FOR DELIVERY!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+                f"👤 <b>Buyer:</b> {order.get('first_name', 'User')} (@{order.get('username') or 'N/A'} | ID: <code>{buyer_id}</code>)\n"
+                f"📱 <b>Mined Phone:</b> <code>+91{delivered_phone}</code>\n"
+                f"💰 <b>Amount:</b> ₹{order.get('amount')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📋 <b>Mined JSON Data:</b>\n"
+                f"<pre><code>{account_json_str[:3000]}</code></pre>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👉 <b>Choose Delivery Action:</b>\n"
+                f"• <b>Send This JSON:</b> Yahi mined account buyer ko deliver karein.\n"
+                f"• <b>Custom JSON / File:</b> Apni koi dusri JSON file ya text bhejein (/deliver {order_id})."
+            )
+            admin_delivery_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "📤 Send This Mined JSON to Buyer", "callback_data": f"send_mined_{order_id}"},
+                    ],
+                    [
+                        {"text": "📁 Upload Custom File / JSON to Buyer", "callback_data": f"deliver_custom_{order_id}"},
+                    ],
+                    [
+                        {"text": "💬 Message Buyer Directly", "callback_data": f"reply_user_{buyer_id}"},
+                    ]
+                ]
+            }
+            await send_tg_message(client, ADMIN_CHAT_ID, admin_delivery_msg, reply_markup=admin_delivery_kb)
+            await send_tg_document(
+                client,
+                ADMIN_CHAT_ID,
+                filename=f"order_{order_id}_{delivered_phone}.json",
+                content=account_json_str,
+                caption=f"📁 Mined Account for Order #{order_id} (+91{delivered_phone})",
+            )
+    else:
+        order["status"] = "FAILED"
+        save_order(order)
+        await send_tg_message(
+            client,
+            buyer_id,
+            f"⚠️ <b>Order Processing Update</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Order <code>#{order_id}</code> ke liye auto-generation mein thodi deri ho rahi hai. Admin jald hi aapse contact karenge.\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+            reply_markup=USER_MAIN_MENU_KEYBOARD,
+        )
+        if ADMIN_CHAT_ID:
+            await send_tg_message(
+                client,
+                ADMIN_CHAT_ID,
+                f"⚠️ <b>ORDER AUTO-HUNT FAILED!</b>\n\n"
+                f"Order <code>#{order_id}</code> (User: <code>{buyer_id}</code>) hunt nahi ho paya.\n"
+                f"Kripya OTP Doctor balance / servers check karein ya <code>/deliver {order_id}</code> se manually custom JSON send karein.",
+                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+            )
 
 
 def build_server_selection_keyboard(selected_servers: list, all_known: dict):
@@ -1249,11 +1746,15 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             with open(fname, "w", encoding="utf-8") as f:
                 f.write(json_str)
 
+            # 🛒 Auto-Sync to TelegramBotSell Store Stock
+            sync_res = sync_to_sell_store(account_data, phone)
+            store_tag = f"\n🛒 <b>Auto-Stocked in Sell Bot:</b> ✅ Live (Total Stock: {sync_res.get('stock', 1)})" if sync_res.get("ok") else ""
+
             account_msg = (
                 f"🎉 <b>MEESHO ACCOUNT SUCCESSFULLY CREATED!</b>\n\n"
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
                 f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
-                f"🏷️ <b>Server:</b> <code>{current_server}</code>\n\n"
+                f"🏷️ <b>Server:</b> <code>{current_server}</code>{store_tag}\n\n"
                 f"📋 <b>Account JSON:</b>\n"
                 f"<pre><code>{json_str}</code></pre>"
             )
@@ -1403,6 +1904,7 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
     login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev)
 
     if login_res.get("ok"):
+        is_reg = state.get("is_registered", False)
         state["manual_step"] = None
         state["manual_phone"] = None
         user_id = login_res.get("user_id")
@@ -1420,11 +1922,15 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
         with open(fname, "w", encoding="utf-8") as f:
             f.write(json_str)
 
+        # 🛒 Auto-Sync to TelegramBotSell Store Stock
+        sync_res = sync_to_sell_store(account_data, phone)
+        store_tag = f"\n🛒 <b>Auto-Stocked in Sell Bot:</b> ✅ Live (Total Stock: {sync_res.get('stock', 1)})" if sync_res.get("ok") else ""
+
         account_msg = (
             f"🎉 <b>MEESHO ACCOUNT SUCCESSFULLY CREATED!</b>\n\n"
             f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
             f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
-            f"🏷️ <b>Type:</b> {'Old User' if is_reg else 'Fresh User'}\n\n"
+            f"🏷️ <b>Type:</b> {'Old User' if is_reg else 'Fresh User'}{store_tag}\n\n"
             f"📋 <b>Account JSON:</b>\n"
             f"<pre><code>{json_str}</code></pre>"
         )
@@ -1500,12 +2006,16 @@ async def convert_and_send_json(client: httpx.AsyncClient, chat_id: int | str, c
         )
 
 
-# ─── Telegram Bot Polling Loop ────────────────────────────────────────────────
+# ─── Telegram Bot Polling Loop (Dual-Mode: User Store & Admin Hunter) ─────────
 async def bot_loop():
     print("🤖 Multi-Server Meesho Bot Started! (@BotFather verified)")
     async with httpx.AsyncClient() as client:
         try:
-            await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", json={"drop_pending_updates": True}, timeout=10)
+            await client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+                json={"drop_pending_updates": True},
+                timeout=10,
+            )
         except Exception:
             pass
 
@@ -1515,7 +2025,11 @@ async def bot_loop():
             try:
                 r = await client.post(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-                    json={"offset": offset, "timeout": 25, "allowed_updates": ["message"]},
+                    json={
+                        "offset": offset,
+                        "timeout": 25,
+                        "allowed_updates": ["message", "callback_query"],
+                    },
                     timeout=35.0,
                 )
                 data = r.json()
@@ -1523,58 +2037,760 @@ async def bot_loop():
 
                 for u in updates:
                     offset = u["update_id"] + 1
+
+                    # ══════════════════════════════════════════════════════════
+                    # 1. HANDLE CALLBACK QUERIES (Buttons)
+                    # ══════════════════════════════════════════════════════════
+                    cb = u.get("callback_query")
+                    if cb:
+                        cb_id = cb.get("id")
+                        cb_from = cb.get("from", {})
+                        cb_user_id = cb_from.get("id")
+                        cb_data = cb.get("data", "")
+                        cb_msg = cb.get("message")
+                        cb_chat_id = cb_msg["chat"]["id"] if cb_msg else cb_user_id
+
+                        # ── Admin Approve Order Callback ──
+                        if cb_data.startswith("approve_ord_"):
+                            order_id = cb_data.replace("approve_ord_", "").strip()
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+
+                            ord_item = get_order(order_id)
+                            if not ord_item:
+                                await answer_tg_callback(client, cb_id, f"❌ Order {order_id} not found!", show_alert=True)
+                                continue
+
+                            if ord_item.get("status") in ("COMPLETED", "PROCESSING"):
+                                await answer_tg_callback(client, cb_id, f"⚠️ Order already {ord_item.get('status')}!", show_alert=True)
+                                continue
+
+                            await answer_tg_callback(client, cb_id, f"✅ Order {order_id} Approved! Auto-hunt started.")
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"🚀 <b>Order Approved!</b> Starting on-demand auto-hunt for Order <code>{order_id}</code>...",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                            asyncio.create_task(mine_and_deliver_order(client, order_id))
+                            continue
+
+                        # ── Admin Reject Order Callback ──
+                        elif cb_data.startswith("reject_ord_"):
+                            order_id = cb_data.replace("reject_ord_", "").strip()
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+
+                            ord_item = get_order(order_id)
+                            if ord_item:
+                                ord_item["status"] = "REJECTED"
+                                ord_item["rejected_at"] = time.time()
+                                save_order(ord_item)
+                                buyer_id = ord_item.get("user_id")
+                                if buyer_id:
+                                    await send_tg_message(
+                                        client,
+                                        buyer_id,
+                                        f"❌ <b>Order Update:</b> Aapka Order <code>{order_id}</code> reject kar diya gaya hai (Payment not verified).\nKripya support se sampark karein.",
+                                        reply_markup=USER_MAIN_MENU_KEYBOARD,
+                                    )
+
+                            await answer_tg_callback(client, cb_id, f"❌ Order {order_id} Rejected.")
+                            await send_tg_message(client, cb_chat_id, f"❌ Order <code>{order_id}</code> mark as REJECTED.")
+                            continue
+
+                        # ── Admin Deliver Mined JSON to Buyer Callback ──
+                        elif cb_data.startswith("send_mined_"):
+                            order_id = cb_data.replace("send_mined_", "").strip()
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+
+                            ord_item = get_order(order_id)
+                            if not ord_item:
+                                await answer_tg_callback(client, cb_id, "❌ Order not found!", show_alert=True)
+                                continue
+
+                            buyer_id = str(ord_item.get("user_id"))
+                            mined_json = ord_item.get("mined_json") or "{}"
+                            mined_phone = ord_item.get("mined_phone") or "0000000000"
+
+                            ord_item["status"] = "COMPLETED"
+                            ord_item["delivered_phone"] = mined_phone
+                            ord_item["delivered_at"] = time.time()
+                            save_order(ord_item)
+
+                            buyer_msg = (
+                                f"🎉 <b>AAPKA MEESHO JSON ORDER READY HAI!</b>\n\n"
+                                f"🆔 <b>Order ID:</b> <code>{order_id}</code>\n"
+                                f"📱 <b>Mobile:</b> <code>+91{mined_phone}</code>\n"
+                                f"⚡ <b>Status:</b> 100% Verified & Delivered!\n\n"
+                                f"📋 <b>Account JSON:</b>\n"
+                                f"<pre><code>{mined_json}</code></pre>\n\n"
+                                f"👇 Niche di gayi <code>.json</code> file download karke use karein. Thank you for shopping with us!"
+                            )
+                            await send_tg_message(client, buyer_id, buyer_msg, reply_markup=USER_MAIN_MENU_KEYBOARD)
+                            await send_tg_document(
+                                client,
+                                buyer_id,
+                                filename=f"meesho_{mined_phone}.json",
+                                content=mined_json,
+                                caption=f"✅ Meesho Account JSON (+91{mined_phone})",
+                            )
+
+                            await answer_tg_callback(client, cb_id, f"✅ Order {order_id} delivered to buyer!")
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"✅ Order <code>{order_id}</code> (Mined account +91{mined_phone}) successfully delivered to User <code>{buyer_id}</code>!",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                            continue
+
+                        # ── Admin Deliver Custom File / JSON to Buyer Callback ──
+                        elif cb_data.startswith("deliver_custom_"):
+                            order_id = cb_data.replace("deliver_custom_", "").strip()
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+
+                            ord_item = get_order(order_id)
+                            if not ord_item:
+                                await answer_tg_callback(client, cb_id, "❌ Order not found!", show_alert=True)
+                                continue
+
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["awaiting_custom_delivery_order"] = order_id
+                            await answer_tg_callback(client, cb_id, f"Custom delivery active for #{order_id}")
+                            cancel_kb = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"📤 <b>CUSTOM FILE / JSON DELIVERY MODE:</b>\n\n"
+                                f"🆔 <b>Order ID:</b> <code>{order_id}</code>\n"
+                                f"👤 <b>Buyer ID:</b> <code>{ord_item.get('user_id')}</code>\n\n"
+                                f"👉 Ab aap is user ke liye jo <b>.json file upload karenge</b> ya <b>JSON text message</b> paste karenge, woh seedha buyer ke pass official order delivery ban kar chali jayegi!",
+                                reply_markup=cancel_kb,
+                            )
+                            continue
+
+                        # ── Admin Direct Reply to User Callback ──
+                        elif cb_data.startswith("reply_user_"):
+                            target_uid = cb_data.replace("reply_user_", "").strip()
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["awaiting_admin_reply_user"] = target_uid
+                            await answer_tg_callback(client, cb_id, f"Replying to User {target_uid}")
+                            cancel_kb = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"💬 <b>Direct Message to User <code>{target_uid}</code>:</b>\n\n"
+                                f"Apna message type karke bhejein. Bot is user ko seedha support message deliver karega.",
+                                reply_markup=cancel_kb,
+                            )
+                            continue
+
+                        # ── Buyer Submit UTR Callback ──
+                        elif cb_data.startswith("submit_utr_"):
+                            order_id = cb_data.replace("submit_utr_", "").strip()
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["awaiting_utr_order"] = order_id
+                            await answer_tg_callback(client, cb_id, "Please enter your 12-digit UTR number.")
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"💳 <b>Order #{order_id} — Submit UTR:</b>\n\n"
+                                f"Apne payment receipt ka <b>12-digit UTR / Ref Number</b> yahan type karke bhejein:\n<i>(Jaise: <code>428910293849</code>)</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        # ── Buyer Cancel Order Callback ──
+                        elif cb_data.startswith("cancel_ord_"):
+                            order_id = cb_data.replace("cancel_ord_", "").strip()
+                            ord_item = get_order(order_id)
+                            if ord_item and ord_item.get("status") == "AWAITING_PAYMENT":
+                                ord_item["status"] = "CANCELLED"
+                                save_order(ord_item)
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["awaiting_utr_order"] = None
+                            await answer_tg_callback(client, cb_id, "Order cancelled.")
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"❌ Order <code>{order_id}</code> cancel ho gaya.",
+                                reply_markup=USER_MAIN_MENU_KEYBOARD,
+                            )
+                            continue
+
+                        else:
+                            await answer_tg_callback(client, cb_id)
+                            continue
+
+                    # ══════════════════════════════════════════════════════════
+                    # 2. HANDLE TELEGRAM MESSAGES
+                    # ══════════════════════════════════════════════════════════
                     msg = u.get("message")
                     if not msg:
                         continue
 
                     chat_id = msg["chat"]["id"]
+                    from_user = msg.get("from", {})
+                    first_name = from_user.get("first_name", "User")
+                    username = from_user.get("username", "")
                     text = (msg.get("text") or "").strip()
-
-                    if ADMIN_CHAT_ID and str(chat_id) != str(ADMIN_CHAT_ID):
-                        await send_tg_message(client, chat_id, "⛔ <b>Access Denied!</b> Yeh bot private hai.")
-                        continue
 
                     state = ACTIVE_TASKS.setdefault(chat_id, {"hunting": False, "active_id": None, "stop_flag": False})
                     cfg = get_user_config(chat_id)
                     all_servers = {**KNOWN_SERVERS, **cfg.get("custom_servers", {})}
+                    admin_flag = is_admin(chat_id)
+                    store_settings = load_store_settings()
+                    current_price = get_store_price()
 
-                    # ── /cancel or ❌ Cancel ──
+                    # ── Common: Cancel / Back to Menu ──
                     if text in ("/cancel", "❌ Cancel", "cancel", "🔙 Back to Menu"):
                         state["manual_step"] = None
                         state["manual_phone"] = None
-                        await send_tg_message(client, chat_id, "✅ Main menu par aa gaye.", reply_markup=MAIN_MENU_KEYBOARD)
+                        state["awaiting_utr_order"] = None
+                        state["awaiting_custom_delivery_order"] = None
+                        state["awaiting_admin_reply_user"] = None
+                        state["in_support"] = None
+                        menu_kb = ADMIN_MAIN_MENU_KEYBOARD if admin_flag else USER_MAIN_MENU_KEYBOARD
+                        await send_tg_message(client, chat_id, "✅ Main menu par aa gaye.", reply_markup=menu_kb)
                         continue
 
-                     # ── /start or /help ──
+                    # ══════════════════════════════════════════════════════════
+                    # 👑 ADMIN CUSTOM DELIVERY & DIRECT MESSAGING HANDLERS
+                    # ══════════════════════════════════════════════════════════
+                    if admin_flag:
+                        # ── Admin Delivering Custom File / JSON to User ──
+                        if state.get("awaiting_custom_delivery_order") or (msg.get("document") and state.get("awaiting_custom_delivery_order")):
+                            target_ord_id = state.get("awaiting_custom_delivery_order")
+                            ord_item = get_order(target_ord_id)
+                            if ord_item:
+                                buyer_id = str(ord_item.get("user_id"))
+                                doc = msg.get("document")
+                                content = text
+                                file_bytes = None
+                                filename = "meesho_account.json"
+                                if doc and doc.get("file_id"):
+                                    try:
+                                        f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
+                                        if f_res.status_code == 200:
+                                            f_path = f_res.json().get("result", {}).get("file_path")
+                                            if f_path:
+                                                dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
+                                                file_bytes = dl_res.content
+                                                content = dl_res.text
+                                                filename = doc.get("file_name", "meesho_account.json")
+                                    except Exception as e:
+                                        print(f"[AdminDocDL Error] {e}")
+
+                                ord_item["status"] = "COMPLETED"
+                                ord_item["custom_delivered"] = True
+                                ord_item["delivered_at"] = time.time()
+                                save_order(ord_item)
+                                state["awaiting_custom_delivery_order"] = None
+
+                                buyer_msg = (
+                                    f"🎉 <b>AAPKA MEESHO JSON ORDER READY HAI!</b>\n\n"
+                                    f"🆔 <b>Order ID:</b> <code>{target_ord_id}</code>\n"
+                                    f"⚡ <b>Status:</b> 100% Verified & Delivered!\n\n"
+                                    f"📋 <b>Account Details:</b>\n"
+                                    f"<pre><code>{content[:3000]}</code></pre>\n\n"
+                                    f"👇 Niche di gayi <code>.json</code> file download karke use karein. Thank you for shopping with us!"
+                                )
+                                await send_tg_message(client, buyer_id, buyer_msg, reply_markup=USER_MAIN_MENU_KEYBOARD)
+                                if file_bytes:
+                                    await send_tg_document(client, buyer_id, filename=filename, content=file_bytes, caption=f"✅ Meesho Account JSON ({filename})")
+                                else:
+                                    await send_tg_document(client, buyer_id, filename=f"order_{target_ord_id}.json", content=content, caption=f"✅ Meesho Account JSON (Order #{target_ord_id})")
+
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"🎉 <b>CUSTOM FILE SUCCESSFULLY DELIVERED!</b>\n\n"
+                                    f"🆔 <b>Order ID:</b> <code>{target_ord_id}</code>\n"
+                                    f"👤 <b>Buyer ID:</b> <code>{buyer_id}</code>\n"
+                                    f"Status: <b>COMPLETED</b>",
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                )
+                                continue
+
+                        # ── Admin Direct Replying to User Message ──
+                        if state.get("awaiting_admin_reply_user"):
+                            target_uid = str(state.get("awaiting_admin_reply_user"))
+                            state["awaiting_admin_reply_user"] = None
+                            user_recv_msg = (
+                                f"💬 <b>Support Message from Admin:</b>\n\n"
+                                f"{text}"
+                            )
+                            await send_tg_message(client, target_uid, user_recv_msg, reply_markup=USER_MAIN_MENU_KEYBOARD)
+                            await send_tg_message(client, chat_id, f"✅ Message sent to User <code>{target_uid}</code>!", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                            continue
+
+                    # ══════════════════════════════════════════════════════════
+                    # 🛍️ BUYER / NORMAL USER INTERFACE (Non-Admin)
+                    # ══════════════════════════════════════════════════════════
+                    if not admin_flag:
+                        # ── Detect UTR Submission ──
+                        extracted_utr = None
+                        if re.match(r"^\d{10,16}$", text):
+                            extracted_utr = text
+                        elif state.get("awaiting_utr_order") and re.search(r"\d{10,16}", text):
+                            m = re.search(r"\d{10,16}", text)
+                            if m:
+                                extracted_utr = m.group(0)
+
+                        if extracted_utr:
+                            # Match order
+                            target_order_id = state.get("awaiting_utr_order")
+                            order = None
+                            if target_order_id:
+                                order = get_order(target_order_id)
+                            if not order:
+                                user_ords = get_user_orders(chat_id)
+                                pending = [o for o in user_ords if o.get("status") == "AWAITING_PAYMENT"]
+                                if pending:
+                                    order = sorted(pending, key=lambda x: x.get("created_at", 0), reverse=True)[0]
+
+                            if order:
+                                order["utr"] = extracted_utr
+                                order["status"] = "PENDING_APPROVAL"
+                                order["submitted_at"] = time.time()
+                                save_order(order)
+                                state["awaiting_utr_order"] = None
+
+                                # Confirm to buyer
+                                user_confirm = (
+                                    f"✅ <b>PAYMENT UTR SUBMITTED!</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🆔 <b>Order ID:</b> <code>#{order['id']}</code>\n"
+                                    f"💰 <b>Amount:</b> ₹{order['amount']}\n"
+                                    f"🔢 <b>Submitted UTR:</b> <code>{extracted_utr}</code>\n"
+                                    f"⏳ <b>Status:</b> <code>Admin Verification Pending</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"⚡ <i>Payment verify hote hi aapka fresh account process hona shuru ho jayega!</i>"
+                                )
+                                await send_tg_message(client, chat_id, user_confirm, reply_markup=USER_MAIN_MENU_KEYBOARD)
+
+                                # Alert Admin
+                                if ADMIN_CHAT_ID:
+                                    admin_alert = (
+                                        f"🚨 <b>NEW MEESHO JSON PAYMENT RECEIVED!</b>\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"🆔 <b>Order ID:</b> <code>#{order['id']}</code>\n"
+                                        f"👤 <b>Buyer:</b> {first_name} (@{username} | ID: <code>{chat_id}</code>)\n"
+                                        f"💰 <b>Amount:</b> ₹{order['amount']}\n"
+                                        f"🔢 <b>UTR / Ref:</b> <code>{extracted_utr}</code>\n"
+                                        f"📅 <b>Time:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"👇 <b>Select Action:</b>"
+                                    )
+                                    admin_inline_kb = {
+                                        "inline_keyboard": [
+                                            [
+                                                {"text": "✅ Approve & Start Hunt", "callback_data": f"approve_ord_{order['id']}"},
+                                                {"text": "📁 Deliver Custom JSON", "callback_data": f"deliver_custom_{order['id']}"},
+                                            ],
+                                            [
+                                                {"text": "💬 Message Buyer", "callback_data": f"reply_user_{chat_id}"},
+                                                {"text": "❌ Reject", "callback_data": f"reject_ord_{order['id']}"},
+                                            ]
+                                        ]
+                                    }
+                                    await send_tg_message(client, ADMIN_CHAT_ID, admin_alert, reply_markup=admin_inline_kb)
+                                continue
+
+                        # ── Buyer /start or /help ──
+                        if text.startswith("/start") or text.startswith("/help"):
+                            welcome_text = (
+                                f"🛍️ <b>WELCOME TO MEESHO JSON STORE</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"⚡ <b>100% Fresh • Unregistered • High-Speed Delivery</b>\n\n"
+                                f"💎 <b>Instant Premium Meesho Accounts:</b>\n"
+                                f"• <b>Live Price:</b> <code>₹{current_price} / Account</code>\n"
+                                f"• <b>Account Type:</b> 100% Fresh Unregistered OTP Login\n"
+                                f"• <b>Format:</b> Clean & Ready-to-use <code>.json</code> File\n"
+                                f"• <b>Delivery:</b> Direct File Download in Telegram\n\n"
+                                f"👇 <i>Niche diye gaye menu se <b>🛍️ Buy Meesho JSON</b> dabayein!</i>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            )
+                            await send_tg_message(client, chat_id, welcome_text, reply_markup=USER_MAIN_MENU_KEYBOARD)
+                            continue
+
+                        # ── Buyer Buy Meesho JSON ──
+                        elif text in ("🛍️ Buy Meesho JSON", "/buy", "buy", "Buy"):
+                            order_id = f"ORD{int(time.time()) % 1000000:06d}"
+                            upi_id = store_settings.get("upi_id", "paytmqr28100505010115i3puxb4eoa@paytm")
+                            upi_name = store_settings.get("upi_name", "Meesho Store")
+
+                            new_order = {
+                                "id": order_id,
+                                "user_id": str(chat_id),
+                                "username": username,
+                                "first_name": first_name,
+                                "amount": current_price,
+                                "status": "AWAITING_PAYMENT",
+                                "created_at": time.time(),
+                                "utr": None,
+                            }
+                            save_order(new_order)
+                            state["awaiting_utr_order"] = order_id
+
+                            qr_bytes = generate_upi_qr_bytes(upi_id, upi_name, current_price, order_id)
+                            invoice_caption = (
+                                f"🧾 <b>MEESHO JSON OFFICIAL INVOICE</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+                                f"💵 <b>Total Payable:</b> <b>₹{current_price}</b>\n"
+                                f"👤 <b>Payee Name:</b> {upi_name}\n"
+                                f"📲 <b>UPI ID:</b> <code>{upi_id}</code>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📌 <b>PAYMENT STEPS:</b>\n"
+                                f"1️⃣ Upar diye gaye QR Code ko Paytm / PhonePe / GPay se scan karein.\n"
+                                f"2️⃣ <b>₹{current_price}</b> ka exact payment karein.\n"
+                                f"3️⃣ Payment ke baad <b>12-digit UTR / Ref Number</b> copy karein.\n"
+                                f"4️⃣ Niche <b>Submit UTR</b> button dabakar ya seedhe yahan UTR likhkar bhejein.\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            )
+                            qr_inline_kb = {
+                                "inline_keyboard": [
+                                    [{"text": "💳 Submit UTR / Ref No", "callback_data": f"submit_utr_{order_id}"}],
+                                    [{"text": "❌ Cancel Order", "callback_data": f"cancel_ord_{order_id}"}],
+                                ]
+                            }
+                            await send_tg_photo(client, chat_id, qr_bytes, caption=invoice_caption, reply_markup=qr_inline_kb)
+                            continue
+
+                        # ── Buyer My Orders ──
+                        elif text in ("📦 My Orders", "/orders", "orders"):
+                            u_ords = get_user_orders(chat_id)
+                            if not u_ords:
+                                await send_tg_message(client, chat_id, "ℹ️ Aapka koi order nahi mila. Naya order place karne ke liye <b>🛍️ Buy Meesho JSON</b> dabayein.", reply_markup=USER_MAIN_MENU_KEYBOARD)
+                                continue
+
+                            recent = sorted(u_ords, key=lambda x: x.get("created_at", 0), reverse=True)[:5]
+                            lines = [
+                                "📦 <b>AAPKE RECENT ORDERS</b>",
+                                "━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            ]
+                            for o in recent:
+                                st_icon = "🟢" if o.get("status") == "COMPLETED" else "🟡" if o.get("status") in ("PENDING_APPROVAL", "PROCESSING", "READY_FOR_DELIVERY") else "⚪"
+                                lines.append(
+                                    f"{st_icon} <b>Order #{o.get('id')}</b>\n"
+                                    f"• Amount: ₹{o.get('amount')}\n"
+                                    f"• Status: <b>{o.get('status')}</b>\n"
+                                    f"• UTR: <code>{o.get('utr') or 'Not submitted'}</code>\n"
+                                    f"• Delivered: <code>{o.get('delivered_phone') or ('Ready (Awaiting Admin)' if o.get('status') == 'READY_FOR_DELIVERY' else 'Pending')}</code>\n"
+                                    f"┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+                                )
+                            await send_tg_message(client, chat_id, "\n".join(lines), reply_markup=USER_MAIN_MENU_KEYBOARD)
+                            continue
+
+                        # ── Buyer Contact Admin / Support ──
+                        elif text in ("💬 Contact Admin", "/support", "contact"):
+                            state["in_support"] = True
+                            cancel_kb = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            support_prompt = (
+                                f"💬 <b>DIRECT ADMIN SUPPORT</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"Aapka jo bhi sawal, order enquiry ya help chahiye, yahan message likhkar bhejein.\n\n"
+                                f"📩 <i>Aapka message seedha admin ko forward ho jayega aur admin isi chat me reply karenge.</i>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            )
+                            await send_tg_message(client, chat_id, support_prompt, reply_markup=cancel_kb)
+                            continue
+
+                        # ── Buyer Sending Support Message to Admin ──
+                        elif state.get("in_support"):
+                            state["in_support"] = None
+                            if ADMIN_CHAT_ID:
+                                admin_user_msg = (
+                                    f"📩 <b>SUPPORT MESSAGE FROM USER:</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"👤 <b>From:</b> {first_name} (@{username} | ID: <code>{chat_id}</code>)\n"
+                                    f"💭 <b>Message:</b>\n<i>\"{text}\"</i>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"👉 <b>Quick Reply:</b> <code>/msg {chat_id} &lt;reply&gt;</code>"
+                                )
+                                reply_inline_kb = {
+                                    "inline_keyboard": [
+                                        [{"text": "💬 Reply to User", "callback_data": f"reply_user_{chat_id}"}]
+                                    ]
+                                }
+                                await send_tg_message(client, ADMIN_CHAT_ID, admin_user_msg, reply_markup=reply_inline_kb)
+
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"✅ <b>Message Sent to Admin!</b>\n\nAdmin jald hi aapke message ka reply karenge. Thank you!",
+                                reply_markup=USER_MAIN_MENU_KEYBOARD,
+                            )
+                            continue
+
+                        # ── Buyer How It Works ──
+                        elif text in ("ℹ️ How It Works", "/about"):
+                            guide_text = (
+                                f"ℹ️ <b>MEESHO JSON STORE GUIDE</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"1️⃣ <b>Step 1: Place Order</b>\n"
+                                f"   Click <b>🛍️ Buy Meesho JSON</b> to generate your invoice & QR.\n\n"
+                                f"2️⃣ <b>Step 2: Pay via UPI</b>\n"
+                                f"   Scan QR with Paytm/PhonePe/GPay and pay <b>₹{current_price}</b>.\n\n"
+                                f"3️⃣ <b>Step 3: Submit UTR</b>\n"
+                                f"   Submit 12-digit UTR receipt number here.\n\n"
+                                f"4️⃣ <b>Step 4: Automated Account Generation</b>\n"
+                                f"   System fresh unregistered number par account create karta hai.\n\n"
+                                f"5️⃣ <b>Step 5: Direct File Delivery</b>\n"
+                                f"   Aapko ready-to-use <code>.json</code> file isi chat me mil jayegi!\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            )
+                            await send_tg_message(client, chat_id, guide_text, reply_markup=USER_MAIN_MENU_KEYBOARD)
+                            continue
+
+                        else:
+                            # Forward unhandled user message as support query to Admin
+                            if ADMIN_CHAT_ID:
+                                admin_user_msg = (
+                                    f"📩 <b>MESSAGE FROM USER:</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"👤 <b>User:</b> {first_name} (@{username} | ID: <code>{chat_id}</code>)\n"
+                                    f"💭 <i>\"{text}\"</i>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Reply ke liye: <code>/msg {chat_id} &lt;message&gt;</code>"
+                                )
+                                reply_inline_kb = {
+                                    "inline_keyboard": [
+                                        [{"text": "💬 Reply to User", "callback_data": f"reply_user_{chat_id}"}]
+                                    ]
+                                }
+                                await send_tg_message(client, ADMIN_CHAT_ID, admin_user_msg, reply_markup=reply_inline_kb)
+
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"👋 <b>Welcome to Meesho JSON Store!</b>\n\nNiche diye gaye buttons se option choose karein:",
+                                reply_markup=USER_MAIN_MENU_KEYBOARD,
+                            )
+                            continue
+
+                    # ══════════════════════════════════════════════════════════
+                    # 👑 ADMIN HUNTER & STORE MANAGEMENT INTERFACE
+                    # ══════════════════════════════════════════════════════════
+                    # ── Admin /start or /help ──
                     if text.startswith("/start") or text.startswith("/help"):
                         cur_servers = cfg.get("selected_servers", ["5841"])
                         cur_key = (cfg.get("api_key") or "").strip()
                         masked_key = cur_key[:4] + "..." + cur_key[-4:] if len(cur_key) >= 8 else "❌ Not set (Click 🔑 Set API Key)"
                         has_custom_json = "Custom Template Active" if cfg.get("json_template") else "Default Clean Format"
                         menu_text = (
-                            f"👋 <b>Meesho Multi-Server Hunter Bot</b>\n\n"
-                            f"⚙️ <b>Current Settings:</b>\n"
+                            f"👑 <b>Meesho Hunter & Store Master Control</b>\n\n"
+                            f"⚙️ <b>Current Hunter Settings:</b>\n"
                             f"• <b>Active Servers (Max 2):</b> <code>{', '.join(cur_servers)}</code>\n"
                             f"• <b>OTP Doctor API Key:</b> <code>{masked_key}</code>\n"
                             f"• <b>JSON Format:</b> <code>{has_custom_json}</code>\n\n"
-                            f"📌 <b>Features:</b>\n"
-                            f"1️⃣ <b>🚀 Start Hunt</b> — Dual servers se fresh number dhoondhkar auto login karke JSON export karta hai.\n"
-                            f"2️⃣ <b>📱 Check My Number</b> — Apna number check karein, registered hone par bhi OTP bhejne ka option milega.\n"
-                            f"3️⃣ <b>⚙️ Select Servers</b> — Max 2 servers choose karein ya naya server add karein.\n"
-                            f"4️⃣ <b>🔑 Set API Key</b> — Apna personal OTP Doctor API Key save karein.\n"
-                            f"5️⃣ <b>📝 Set JSON Format</b> — Custom JSON format set karein (/setjson).\n"
-                            f"6️⃣ <b>🔄 Convert JSON</b> — Kisi bhi dusre format ke JSON ko template format mein convert karein (/convertjson).\n"
-                            f"7️⃣ <b>💰 Balance</b> — Apne wallet ka balance check karein.\n"
-                            f"8️⃣ <b>🛑 Stop Hunt</b> — Hunting band karein."
+                            f"🛍️ <b>Store Settings:</b>\n"
+                            f"• <b>Meesho JSON Price:</b> ₹{current_price}\n"
+                            f"• <b>UPI ID:</b> <code>{store_settings.get('upi_id')}</code>\n\n"
+                            f"📌 <b>Admin Commands:</b>\n"
+                            f"• <b>/deliver &lt;order_id&gt;</b> — User ko custom JSON file/text deliver karein\n"
+                            f"• <b>/msg &lt;user_id&gt; &lt;text&gt;</b> — User ko direct message/reply bhejein\n"
+                            f"• <b>/broadcast &lt;message&gt;</b> — Sabhi buyers ko announcement send karein\n"
+                            f"• <b>/setprice &lt;amount&gt;</b> — Store price update karein\n"
+                            f"• <b>/setupi &lt;upi_id&gt;</b> — UPI ID change karein"
                         )
-                        await send_tg_message(client, chat_id, menu_text, reply_markup=MAIN_MENU_KEYBOARD)
+                        await send_tg_message(client, chat_id, menu_text, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+
+                    # ── 📤 Deliver Custom File / JSON (/deliver <order_id>) ──
+                    elif text.startswith("/deliver") or text.startswith("/sendjson"):
+                        parts = text.split()
+                        if len(parts) >= 2:
+                            oid = parts[1].strip()
+                            ord_item = get_order(oid)
+                            if ord_item:
+                                state["awaiting_custom_delivery_order"] = oid
+                                cancel_kb = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"📤 <b>Order #{oid} Custom Delivery Mode:</b>\n\n"
+                                    f"👤 <b>Buyer ID:</b> <code>{ord_item.get('user_id')}</code>\n"
+                                    f"👉 Ab aap is user ko jo <b>.json file upload karenge</b> ya <b>JSON text</b> bhejna chahte hain, yahan send karein.",
+                                    reply_markup=cancel_kb,
+                                )
+                            else:
+                                await send_tg_message(client, chat_id, f"❌ Order {oid} not found.")
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/deliver &lt;order_id&gt;</code>")
+
+                    # ── 💬 Direct Message / Reply to User (/msg <user_id> <message>) ──
+                    elif text.startswith("/msg") or text.startswith("/reply"):
+                        parts = text.split(maxsplit=2)
+                        if len(parts) >= 3 and parts[1].isdigit():
+                            target_uid = parts[1].strip()
+                            msg_content = parts[2].strip()
+                            user_recv_msg = (
+                                f"💬 <b>Support Message from Admin:</b>\n\n"
+                                f"{msg_content}"
+                            )
+                            res = await send_tg_message(client, target_uid, user_recv_msg, reply_markup=USER_MAIN_MENU_KEYBOARD)
+                            if res and res.get("ok"):
+                                await send_tg_message(client, chat_id, f"✅ Message sent to User <code>{target_uid}</code>!", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                            else:
+                                await send_tg_message(client, chat_id, f"❌ Failed to send message to User <code>{target_uid}</code> (User may have blocked the bot).", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/msg &lt;user_id&gt; &lt;your message&gt;</code>")
+
+                    # ── 📢 Broadcast Announcement (/broadcast <message>) ──
+                    elif text.startswith("/broadcast"):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and len(parts[1].strip()) > 0:
+                            bcast_text = parts[1].strip()
+                            all_ords = load_orders()
+                            all_cfgs = load_all_configs()
+                            recipients = set()
+                            for o in all_ords.values():
+                                if o.get("user_id"):
+                                    recipients.add(str(o["user_id"]))
+                            for cid in all_cfgs.keys():
+                                recipients.add(str(cid))
+
+                            if str(ADMIN_CHAT_ID) in recipients:
+                                recipients.remove(str(ADMIN_CHAT_ID))
+
+                            if not recipients:
+                                await send_tg_message(client, chat_id, "ℹ️ Koi registered users nahi mile broadcast ke liye.", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                                continue
+
+                            await send_tg_message(client, chat_id, f"📢 <b>Broadcasting message to {len(recipients)} users...</b>")
+                            sent_count = 0
+                            fail_count = 0
+
+                            formatted_bcast = (
+                                f"📢 <b>OFFICIAL ANNOUNCEMENT:</b>\n\n"
+                                f"{bcast_text}"
+                            )
+
+                            for uid in recipients:
+                                try:
+                                    r_b = await send_tg_message(client, uid, formatted_bcast, reply_markup=USER_MAIN_MENU_KEYBOARD)
+                                    if r_b and r_b.get("ok"):
+                                        sent_count += 1
+                                    else:
+                                        fail_count += 1
+                                    await asyncio.sleep(0.05)
+                                except Exception:
+                                    fail_count += 1
+
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"✅ <b>Broadcast Complete!</b>\n\n"
+                                f"📤 <b>Successfully Sent:</b> {sent_count}\n"
+                                f"❌ <b>Failed (Blocked):</b> {fail_count}",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/broadcast &lt;announcement message&gt;</code>")
+
+                    # ── 💰 Set JSON Price (Admin) ──
+                    elif text.startswith("/setprice") or text == "💰 Set JSON Price":
+                        parts = text.split()
+                        if len(parts) == 2 and parts[1].isdigit():
+                            np = int(parts[1])
+                            update_store_price(np)
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"✅ <b>Store Price Updated!</b>\nMeesho JSON ka naya price: <b>₹{np}</b>",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            state["manual_step"] = "awaiting_price"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"💰 <b>Meesho JSON ka Naya Price Bhejein:</b>\n<i>(Current: ₹{current_price}, jaise: <code>99</code> ya <code>149</code>)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_price":
+                        if text.isdigit():
+                            np = int(text)
+                            update_store_price(np)
+                            state["manual_step"] = None
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🎉 <b>Price Successfully Updated to ₹{np}!</b>",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(client, chat_id, "❌ Kripya valid numeric amount bhejein (jaise: <code>99</code>).")
+
+                    # ── 📦 View Orders (Admin) ──
+                    elif text in ("📦 View Orders", "/orders", "/allorders"):
+                        all_ords = load_orders()
+                        if not all_ords:
+                            await send_tg_message(client, chat_id, "ℹ️ Koi orders nahi mile.", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                            continue
+
+                        sorted_ords = sorted(all_ords.values(), key=lambda x: x.get("created_at", 0), reverse=True)[:8]
+                        lines = ["📦 <b>ALL STORE ORDERS:</b>\n"]
+                        for o in sorted_ords:
+                            st_icon = "🟢" if o.get("status") == "COMPLETED" else "🟡" if o.get("status") in ("PENDING_APPROVAL", "PROCESSING", "READY_FOR_DELIVERY") else "❌" if o.get("status") == "REJECTED" else "⚪"
+                            lines.append(
+                                f"{st_icon} <b>Order #{o.get('id')}</b> | User: <code>{o.get('user_id')}</code> (@{o.get('username') or 'N/A'})\n"
+                                f"• Amount: ₹{o.get('amount')} | Status: <b>{o.get('status')}</b>\n"
+                                f"• UTR: <code>{o.get('utr') or 'N/A'}</code> | Deliver: <code>/deliver {o.get('id')}</code>\n"
+                            )
+                        await send_tg_message(client, chat_id, "\n".join(lines), reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+
+                    # ── /setupi <upi_id> [name] (Admin) ──
+                    elif text.startswith("/setupi"):
+                        parts = text.split(maxsplit=2)
+                        if len(parts) >= 2:
+                            new_upi = parts[1].strip()
+                            new_name = parts[2].strip() if len(parts) == 3 else store_settings.get("upi_name", "Meesho Store")
+                            st_cfg = load_store_settings()
+                            st_cfg["upi_id"] = new_upi
+                            st_cfg["upi_name"] = new_name
+                            save_store_settings(st_cfg)
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"✅ <b>UPI Details Updated!</b>\n📲 <b>UPI ID:</b> <code>{new_upi}</code>\n👤 <b>Name:</b> {new_name}",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/setupi your-upi@okaxis PayeeName</code>")
+
+                    # ── /approve <order_id> (Admin) ──
+                    elif text.startswith("/approve"):
+                        parts = text.split()
+                        if len(parts) == 2:
+                            oid = parts[1].strip()
+                            ord_item = get_order(oid)
+                            if ord_item:
+                                await send_tg_message(client, chat_id, f"🚀 <b>Approving Order {oid}...</b> Auto-hunt started.")
+                                asyncio.create_task(mine_and_deliver_order(client, oid))
+                            else:
+                                await send_tg_message(client, chat_id, f"❌ Order {oid} not found.")
 
                     # ── 🔑 Set API Key ──
                     elif text.startswith("/setkey") or text == "🔑 Set API Key":
                         parts = text.split(maxsplit=1)
                         if len(parts) == 2 and len(parts[1].strip()) >= 10:
                             new_key = parts[1].strip()
-                            # Verify key
                             test_bal = await otpd_balance(client, new_key)
                             if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
                                 update_user_config(chat_id, {"api_key": new_key})
@@ -1582,14 +2798,14 @@ async def bot_loop():
                                     client,
                                     chat_id,
                                     f"✅ <b>API Key Successfully Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}",
-                                    reply_markup=MAIN_MENU_KEYBOARD,
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                                 )
                             else:
                                 await send_tg_message(
                                     client,
                                     chat_id,
                                     f"❌ <b>Invalid API Key!</b> OTP Doctor ne reject kiya: <code>{test_bal}</code>\nKripya sahi key bhejein.",
-                                    reply_markup=MAIN_MENU_KEYBOARD,
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                                 )
                         else:
                             state["manual_step"] = "awaiting_api_key"
@@ -1611,7 +2827,7 @@ async def bot_loop():
                                 client,
                                 chat_id,
                                 f"🎉 <b>API Key Verified & Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}",
-                                reply_markup=MAIN_MENU_KEYBOARD,
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                             )
                         else:
                             await send_tg_message(
@@ -1634,7 +2850,7 @@ async def bot_loop():
                                     client,
                                     chat_id,
                                     f"✅ <b>Custom JSON Template Successfully Set!</b>\n\nAb se sabhi naye accounts iss template format mein export honge.\n\n<b>Template Preview:</b>\n<pre><code>{preview}</code></pre>",
-                                    reply_markup=MAIN_MENU_KEYBOARD,
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                                 )
                             except Exception as e:
                                 await send_tg_message(client, chat_id, f"❌ <b>Invalid JSON:</b> <code>{e}</code>\nKripya valid JSON bhejein.")
@@ -1661,7 +2877,7 @@ async def bot_loop():
                             client,
                             chat_id,
                             "🔄 <b>JSON Template Reset to Default!</b> Ab clean default format use hoga.",
-                            reply_markup=MAIN_MENU_KEYBOARD,
+                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                         )
 
                     elif text == "/viewjson":
@@ -1671,7 +2887,7 @@ async def bot_loop():
                             client,
                             chat_id,
                             f"📋 <b>Active JSON Template:</b>\n<pre><code>{cur_str[:3800]}</code></pre>",
-                            reply_markup=MAIN_MENU_KEYBOARD,
+                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                         )
 
                     elif state.get("manual_step") == "awaiting_json_template":
@@ -1699,7 +2915,7 @@ async def bot_loop():
                                 client,
                                 chat_id,
                                 f"🎉 <b>Custom JSON Template Successfully Saved!</b>\n\nAb se sabhi naye accounts iss format mein export honge.\n\n<b>Preview:</b>\n<pre><code>{preview}</code></pre>",
-                                reply_markup=MAIN_MENU_KEYBOARD,
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                             )
                         except Exception as e:
                             await send_tg_message(
@@ -1799,7 +3015,7 @@ async def bot_loop():
                             custom[sid] = {"id": sid, "name": f"Server {sid}", "price": "Custom"}
                             update_user_config(chat_id, {"custom_servers": custom})
                             state["manual_step"] = None
-                            await send_tg_message(client, chat_id, f"✅ Server <code>{sid}</code> successfully add ho gaya!", reply_markup=MAIN_MENU_KEYBOARD)
+                            await send_tg_message(client, chat_id, f"✅ Server <code>{sid}</code> successfully add ho gaya!", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
                         else:
                             await send_tg_message(client, chat_id, "❌ Kripya sirf numeric Server ID bhejein (jaise: <code>5841</code>).")
 
@@ -1887,7 +3103,7 @@ async def bot_loop():
                                 client,
                                 chat_id,
                                 "⚠️ <b>API Key Set Nahi Hai!</b>\nKripya pehle <b>🔑 Set API Key</b> button dabayein ya <code>/setkey &lt;your_key&gt;</code> bhejein.",
-                                reply_markup=MAIN_MENU_KEYBOARD,
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                             )
                             continue
                         b = await otpd_balance(client, api_key)
