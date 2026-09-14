@@ -1689,29 +1689,20 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             continue
 
         # ── FRESH / UNREGISTERED NUMBER FOUND! ──
-        print(f"[{time.strftime('%H:%M:%S')}] 🎉 FRESH NUMBER FOUND: {phone} (ID: {act_id}, Server: {current_server})")
-        await send_tg_message(
-            client,
-            chat_id,
-            f"🎉 <b>FRESH MEESHO NUMBER MILA!</b>\n\n"
-            f"📱 <b>Mobile Number:</b> <code>+91{phone}</code>\n"
-            f"🏷️ <b>Server:</b> <code>{current_server}</code>\n"
-            f"🆔 <b>Activation ID:</b> <code>{act_id}</code>\n\n"
-            f"📤 <b>Meesho OTP send kiya ja raha hai...</b>",
-        )
+        print(f"[{time.strftime('%H:%M:%S')}] 🎉 FRESH NUMBER FOUND: {phone} (ID: {act_id}, Server: {current_server}) — Starting OTP login...")
 
         dev = mk_device()
         otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id)
         if not otp_res.get("ok"):
             err_str = otp_res.get("error", "Failed")
-            await send_tg_message(client, chat_id, f"❌ OTP send failed: <code>{err_str}</code>\nCancelling number for refund...")
+            print(f"[{time.strftime('%H:%M:%S')}] ❌ OTP send failed: {err_str}. Cancelling silently for refund...")
             await otpd_cancel(client, api_key, act_id)
             state["active_id"] = None
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.2)
             continue
 
         session_dict = otp_res["session"]
-        await send_tg_message(client, chat_id, f"⏳ <b>OTP sent! Server {current_server} par SMS ka wait kar rahe hain (max 3 min)...</b>")
+        print(f"[{time.strftime('%H:%M:%S')}] ⏳ OTP sent to {phone}! Waiting for SMS...")
 
         # ── Step 3: Poll OTP Doctor for incoming SMS ──
         otp_code = None
@@ -1735,25 +1726,14 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             await asyncio.sleep(3)
 
         if not otp_code:
-            await send_tg_message(
-                client,
-                chat_id,
-                f"⏰ <b>SMS Timeout!</b> OTP nahi aaya.\nNumber <code>{act_id}</code> cancel karke refund le rahe hain...\n⏳ Naye numbers dhoondhna continue rahega!",
-            )
+            print(f"[{time.strftime('%H:%M:%S')}] ⏰ SMS Timeout for {phone}. Cancelling silently for refund...")
             await otpd_cancel(client, api_key, act_id)
             state["active_id"] = None
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.2)
             continue
 
         # ── Step 4: Verify OTP & Login to Meesho ──
-        await send_tg_message(
-            client,
-            chat_id,
-            f"📩 <b>SMS Aaya:</b> <code>{sms_text}</code>\n"
-            f"🔑 <b>OTP:</b> <code>{otp_code}</code>\n"
-            f"🔐 <b>Meesho account login ho raha hai...</b>",
-        )
-
+        print(f"[{time.strftime('%H:%M:%S')}] 🔐 Verifying OTP {otp_code} for {phone}...")
         login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev)
 
         if login_res.get("ok"):
@@ -1798,11 +1778,11 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             state["active_id"] = None
         else:
             err_msg = login_res.get("error", "Login failed")
-            await send_tg_message(client, chat_id, f"❌ Meesho login failed: <code>{err_msg}</code>\nCancelling number...")
+            print(f"[{time.strftime('%H:%M:%S')}] ❌ Meesho login failed: {err_msg}. Cancelling silently...")
             await otpd_cancel(client, api_key, act_id)
             state["active_id"] = None
 
-        await asyncio.sleep(8)
+        await asyncio.sleep(1.5)
 
     state["hunting"] = False
     state["active_id"] = None
