@@ -1642,14 +1642,10 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
                 continue
 
             if "NO_NUMBERS" in err or "TRY_AGAIN" in err:
-                # If 2 servers are configured, immediately try the other server
-                if len(servers) > 1:
-                    await asyncio.sleep(2)
-                else:
-                    await asyncio.sleep(10)
+                await asyncio.sleep(1.2)
                 continue
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(1.5)
             continue
 
         act_id = res["id"]
@@ -1659,7 +1655,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
 
         chk = await check_meesho_reg(client, phone)
         if not chk["ok"]:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.0)
             chk = await check_meesho_reg(client, phone)
 
         # 🚨 Both registration checker APIs failed / down!
@@ -1689,7 +1685,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             print(f"[{time.strftime('%H:%M:%S')}] Number {phone} is REGISTERED. Cancelling Server {current_server}...")
             await otpd_cancel(client, api_key, act_id)
             state["active_id"] = None
-            await asyncio.sleep(8)
+            await asyncio.sleep(1.0)  # Fast turnaround 1s
             continue
 
         # ── FRESH / UNREGISTERED NUMBER FOUND! ──
@@ -1711,7 +1707,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             await send_tg_message(client, chat_id, f"❌ OTP send failed: <code>{err_str}</code>\nCancelling number for refund...")
             await otpd_cancel(client, api_key, act_id)
             state["active_id"] = None
-            await asyncio.sleep(8)
+            await asyncio.sleep(1.5)
             continue
 
         session_dict = otp_res["session"]
@@ -1736,7 +1732,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
                     otp_code = digits[0]
                     print(f"[{time.strftime('%H:%M:%S')}] 🔑 Extracted OTP: {otp_code}")
                     break
-            await asyncio.sleep(4)
+            await asyncio.sleep(3)
 
         if not otp_code:
             await send_tg_message(
@@ -1746,7 +1742,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             )
             await otpd_cancel(client, api_key, act_id)
             state["active_id"] = None
-            await asyncio.sleep(8)
+            await asyncio.sleep(1.5)
             continue
 
         # ── Step 4: Verify OTP & Login to Meesho ──
