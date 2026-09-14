@@ -213,6 +213,7 @@ DEFAULT_STORE_SETTINGS = {
     "upi_name": os.getenv("UPI_NAME", "Meesho JSON Store").strip(),
     "admin_username": os.getenv("ADMIN_USERNAME", "shivamthakur01").strip().lstrip("@"),
     "support_text": os.getenv("SUPPORT_TEXT", "Admin se baat karne ke liye yahan contact karein: @shivamthakur01"),
+    "referral_link": os.getenv("REFERRAL_LINK", "https://app.meesho.com/2yoV/r99th0qd?via=9qx7y4&from=referral_program").strip(),
 }
 
 
@@ -288,6 +289,35 @@ def get_store_price() -> int:
 def update_store_price(new_price: int):
     st = load_store_settings()
     st["meesho_price"] = int(new_price)
+    save_store_settings(st)
+
+
+def get_referral_link() -> str:
+    st = load_store_settings()
+    return (st.get("referral_link") or REFERRAL_LINK).strip()
+
+
+def update_referral_link(new_link: str):
+    st = load_store_settings()
+    st["referral_link"] = new_link.strip()
+    save_store_settings(st)
+
+
+def get_store_upi_id() -> str:
+    st = load_store_settings()
+    return st.get("upi_id", "paytmqr28100505010115i3puxb4eoa@paytm").strip()
+
+
+def get_store_upi_name() -> str:
+    st = load_store_settings()
+    return st.get("upi_name", "Meesho JSON Store").strip()
+
+
+def update_store_upi(new_upi_id: str, new_name: str = None):
+    st = load_store_settings()
+    st["upi_id"] = new_upi_id.strip()
+    if new_name:
+        st["upi_name"] = new_name.strip()
     save_store_settings(st)
 
 
@@ -744,9 +774,10 @@ async def verify_meesho_otpless_fallback(client: httpx.AsyncClient, phone: str, 
 
 async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None) -> dict:
     """Dispatches OTP using Crowstack API (primary) -> Hidenfree API -> GemixAI API (with ₹200 reroll) -> direct OTPLESS."""
-    # 1. Primary: Crowstack API (with user referral link)
+    # 1. Primary: Crowstack API (with dynamic user referral link)
     try:
-        payload = {"phone": phone, "ref_link": REFERRAL_LINK, "force": True}
+        cur_ref = get_referral_link()
+        payload = {"phone": phone, "ref_link": cur_ref, "force": True}
         resp = await client.post(
             f"{CROWSTACK_BASE}/send-otp",
             headers=CROWSTACK_HEADERS,
@@ -1267,8 +1298,8 @@ ADMIN_MAIN_MENU_KEYBOARD = {
         [{"text": "🚀 Start Hunt"}, {"text": "📱 Check My Number"}],
         [{"text": "⚙️ Select Servers"}, {"text": "🔑 Set API Key"}],
         [{"text": "📝 Set JSON Format"}, {"text": "🔄 Convert JSON"}],
+        [{"text": "⚙️ Store Settings"}, {"text": "📦 View Orders"}],
         [{"text": "📊 Stats"}, {"text": "💰 Balance"}],
-        [{"text": "💰 Set JSON Price"}, {"text": "📦 View Orders"}],
         [{"text": "🛑 Stop Hunt"}],
     ],
     "resize_keyboard": True,
@@ -2230,6 +2261,66 @@ async def bot_loop():
                             )
                             continue
 
+                        # ── Admin Store Settings Callbacks ──
+                        elif cb_data == "set_ref_link":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_referral_link"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            cur_ref = get_referral_link()
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"🔗 <b>Meesho Referral Program Link Set Karein:</b>\n\n"
+                                f"<b>Current Link:</b>\n<code>{cur_ref}</code>\n\n"
+                                f"👉 <i>Apna naya Meesho referral link yahan type/paste karke bhejein:</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        elif cb_data == "set_upi_id":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_upi"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            cur_upi = get_store_upi_id()
+                            cur_name = get_store_upi_name()
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"💳 <b>Store UPI Details Set Karein:</b>\n\n"
+                                f"• <b>Current UPI ID:</b> <code>{cur_upi}</code>\n"
+                                f"• <b>Current Payee Name:</b> {cur_name}\n\n"
+                                f"👉 <i>Apna naya UPI ID aur Name bhejein:\nFormat: <code>your-upi@paytm Payee Name</code></i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        elif cb_data == "set_price":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_price"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            cur_p = get_store_price()
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"💰 <b>Meesho JSON Price Set Karein:</b>\n\n"
+                                f"• <b>Current Price:</b> ₹{cur_p} / Account\n\n"
+                                f"👉 <i>Naya numeric price bhejein (jaise: <code>99</code> ya <code>149</code>):</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
                         else:
                             await answer_tg_callback(client, cb_id)
                             continue
@@ -2599,15 +2690,84 @@ async def bot_loop():
                             f"• <b>JSON Format:</b> <code>{has_custom_json}</code>\n\n"
                             f"🛍️ <b>Store Settings:</b>\n"
                             f"• <b>Meesho JSON Price:</b> ₹{current_price}\n"
-                            f"• <b>UPI ID:</b> <code>{store_settings.get('upi_id')}</code>\n\n"
+                            f"• <b>UPI ID:</b> <code>{get_store_upi_id()}</code>\n"
+                            f"• <b>Referral Link:</b> <code>{get_referral_link()[:35]}...</code>\n\n"
                             f"📌 <b>Admin Commands:</b>\n"
+                            f"• <b>/setreferral &lt;link&gt;</b> — Referral link update karein\n"
+                            f"• <b>/setupi &lt;upi_id&gt; [name]</b> — UPI ID & Name change karein\n"
+                            f"• <b>/setprice &lt;amount&gt;</b> — Store price change karein\n"
                             f"• <b>/deliver &lt;order_id&gt;</b> — User ko custom JSON file/text deliver karein\n"
                             f"• <b>/msg &lt;user_id&gt; &lt;text&gt;</b> — User ko direct message/reply bhejein\n"
-                            f"• <b>/broadcast &lt;message&gt;</b> — Sabhi buyers ko announcement send karein\n"
-                            f"• <b>/setprice &lt;amount&gt;</b> — Store price update karein\n"
-                            f"• <b>/setupi &lt;upi_id&gt;</b> — UPI ID change karein"
+                            f"• <b>/broadcast &lt;message&gt;</b> — Sabhi buyers ko announcement send karein"
                         )
                         await send_tg_message(client, chat_id, menu_text, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+
+                    # ── ⚙️ Store Settings Overview (Admin) ──
+                    elif text in ("⚙️ Store Settings", "/settings", "/storesettings"):
+                        cur_ref = get_referral_link()
+                        cur_p = get_store_price()
+                        cur_upi = get_store_upi_id()
+                        cur_name = get_store_upi_name()
+
+                        settings_text = (
+                            f"⚙️ <b>MEESHO STORE & BOT SETTINGS</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💰 <b>Meesho JSON Price:</b> <b>₹{cur_p}</b>\n"
+                            f"📲 <b>UPI ID:</b> <code>{cur_upi}</code>\n"
+                            f"👤 <b>Payee Name:</b> <b>{cur_name}</b>\n"
+                            f"🔗 <b>Referral Link:</b>\n<code>{cur_ref}</code>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"👇 <i>Niche button dabakar koi bhi setting turant update karein:</i>"
+                        )
+                        settings_kb = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "🔗 Change Referral Link", "callback_data": "set_ref_link"},
+                                ],
+                                [
+                                    {"text": "💳 Change UPI ID / Name", "callback_data": "set_upi_id"},
+                                    {"text": "💰 Change Price", "callback_data": "set_price"},
+                                ]
+                            ]
+                        }
+                        await send_tg_message(client, chat_id, settings_text, reply_markup=settings_kb)
+
+                    # ── 🔗 Set Referral Link (/setreferral <link>) ──
+                    elif text.startswith("/setreferral") or text.startswith("/setref") or text == "🔗 Set Referral":
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and (parts[1].strip().startswith("http") or "meesho.com" in parts[1]):
+                            nl = parts[1].strip()
+                            update_referral_link(nl)
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"✅ <b>Meesho Referral Program Link Updated!</b>\n\n🔗 <b>New Link:</b>\n<code>{nl}</code>\n\nAb se sabhi naye accounts iss referral link ke sath register honge.",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            state["manual_step"] = "awaiting_referral_link"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            cur_ref = get_referral_link()
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🔗 <b>Meesho Referral Link Bhejein:</b>\n\n<b>Current:</b> <code>{cur_ref}</code>\n\n<i>(Apna naya Meesho referral program link yahan paste karein)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_referral_link":
+                        nl = text.strip()
+                        if nl.startswith("http://") or nl.startswith("https://") or "meesho.com" in nl:
+                            update_referral_link(nl)
+                            state["manual_step"] = None
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🎉 <b>Referral Program Link Successfully Saved!</b>\n\n🔗 <code>{nl}</code>",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(client, chat_id, "❌ Kripya valid URL bhejein (jaise: <code>https://app.meesho.com/...</code>).")
 
                     # ── 📤 Deliver Custom File / JSON (/deliver <order_id>) ──
                     elif text.startswith("/deliver") or text.startswith("/sendjson"):
@@ -2761,10 +2921,7 @@ async def bot_loop():
                         if len(parts) >= 2:
                             new_upi = parts[1].strip()
                             new_name = parts[2].strip() if len(parts) == 3 else store_settings.get("upi_name", "Meesho Store")
-                            st_cfg = load_store_settings()
-                            st_cfg["upi_id"] = new_upi
-                            st_cfg["upi_name"] = new_name
-                            save_store_settings(st_cfg)
+                            update_store_upi(new_upi, new_name)
                             await send_tg_message(
                                 client,
                                 chat_id,
@@ -2772,7 +2929,28 @@ async def bot_loop():
                                 reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                             )
                         else:
-                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/setupi your-upi@okaxis PayeeName</code>")
+                            state["manual_step"] = "awaiting_upi"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"💳 <b>Store UPI Details Bhejein:</b>\n<i>(Format: <code>your-upi@paytm Payee Name</code>)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_upi":
+                        parts = text.split(maxsplit=1)
+                        new_upi = parts[0].strip()
+                        new_name = parts[1].strip() if len(parts) > 1 else None
+                        update_store_upi(new_upi, new_name)
+                        state["manual_step"] = None
+                        st = load_store_settings()
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            f"🎉 <b>UPI Details Successfully Updated!</b>\n📲 <b>UPI ID:</b> <code>{st.get('upi_id')}</code>\n👤 <b>Payee Name:</b> {st.get('upi_name')}",
+                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                        )
 
                     # ── /approve <order_id> (Admin) ──
                     elif text.startswith("/approve"):
