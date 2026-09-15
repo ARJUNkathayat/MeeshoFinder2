@@ -707,35 +707,78 @@ async def otpd_buy(client: httpx.AsyncClient, api_key: str, svc_id: str) -> dict
         return {"ok": False, "error": str(e), "server_id": svc_id}
 
 
-async def otpd_cancel(client: httpx.AsyncClient, api_key: str, act_id: str) -> bool:
-    for _ in range(5):
-        try:
-            r = await client.get(OTP_DOCTOR_BASE, params={"action": "setStatus", "api_key": api_key, "id": act_id, "status": "8"}, timeout=10)
-            t = r.text.strip()
-            if "CANCEL" in t or "ACCESS" in t:
-                return True
-        except Exception:
-            pass
+async def otpd_cancel_attempt(client: httpx.AsyncClient, api_key: str, act_id: str) -> tuple[bool, str]:
+    # 1. Try standard Handler API
+    try:
+        r = await client.get(
+            OTP_DOCTOR_BASE,
+            params={"action": "setStatus", "api_key": api_key, "id": act_id, "status": "8"},
+            timeout=10,
+        )
+        t = r.text.strip()
+        if "ACCESS_CANCEL" in t or "CANCEL" in t:
+            return True, f"Handler: {t}"
+    except Exception as e:
+        pass
 
-        try:
-            r2 = await client.get(
-                "https://www.otpdoctor.in/api/service/cancelNumberq.php",
-                params={"token": OTP_DOCTOR_WEB_TOKEN, "id": act_id},
-                headers={"user-agent": CHECKER_HEADERS_1["user-agent"]},
-                timeout=10,
-            )
-            data = r2.json()
-            if data.get("status") == 200:
-                return True
-            if data.get("status") == 600:
-                wait_sec = parse_wait_time(data.get("message", ""))
-                await asyncio.sleep(wait_sec + 2)
-                continue
-        except Exception:
-            pass
+    # 2. Try Web Cancel API
+    try:
+        r2 = await client.get(
+            "https://www.otpdoctor.in/api/service/cancelNumberq.php",
+            params={"token": OTP_DOCTOR_WEB_TOKEN, "id": act_id},
+            headers={"user-agent": CHECKER_HEADERS_1["user-agent"]},
+            timeout=10,
+        )
+        data = r2.json()
+        st_code = data.get("status")
+        msg = data.get("message", "")
+        if st_code == 200 or "refunded" in msg.lower() or "cancelled" in msg.lower():
+            return True, f"Web API: {msg} (Bal: {data.get('new_balance', '')})"
+        return False, f"Status {st_code}: {msg}"
+    except Exception as e:
+        return False, str(e)
 
-        await asyncio.sleep(3)
-    return False
+
+async def schedule_delayed_cancel(
+    client: httpx.AsyncClient,
+    api_key: str,
+    act_id: str,
+    phone: str = "",
+    initial_delay: int = 180,
+):
+    """
+    Automatic Cancel & Refund Manager:
+    1. Waits initial_delay (default 3 minutes / 180s) so server lock window expires.
+    2. Sends cancel request to OTP Doctor.
+    3. If not cancelled yet (e.g. status 600 / timer active), retries every 1 minute (60s)
+       until successfully cancelled & refunded.
+    """
+    try:
+        if initial_delay > 0:
+            print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ⏳ Number +91{phone} (ID: {act_id}) queued for cancellation in {initial_delay}s (3 min)...")
+            await asyncio.sleep(initial_delay)
+
+        attempt = 0
+        while True:
+            attempt += 1
+            print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] 🔄 Cancel Attempt #{attempt} for +91{phone} (ID: {act_id})...")
+            success, res_info = await otpd_cancel_attempt(client, api_key, act_id)
+            if success:
+                print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ✅ Number +91{phone} (ID: {act_id}) successfully cancelled & refunded! ({res_info})")
+                break
+
+            print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ⚠️ Cancel rejected for +91{phone} (ID: {act_id}): {res_info}. Retrying in 60s (1 min)...")
+            await asyncio.sleep(60)
+
+    except asyncio.CancelledError:
+        await otpd_cancel_attempt(client, api_key, act_id)
+    except Exception as e:
+        print(f"[AutoCancel Error] +91{phone} (ID: {act_id}): {e}")
+
+
+async def otpd_cancel(client: httpx.AsyncClient, api_key: str, act_id: str, phone: str = "", initial_delay: int = 180) -> bool:
+    asyncio.create_task(schedule_delayed_cancel(client, api_key, act_id, phone=phone, initial_delay=initial_delay))
+    return True
 
 
 async def otpd_get_sms(client: httpx.AsyncClient, api_key: str, act_id: str) -> dict:
@@ -1831,20 +1874,20 @@ async def run_single_key_worker(
 
         if not chk.get("ok"):
             err_detail = chk.get("error", "Both checker endpoints down")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🚨 Checker failed: {err_detail}. Cancelling {phone}...")
-            await otpd_cancel(client, api_key, act_id)
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🚨 Checker failed: {err_detail}. Queued cancel for {phone}...")
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
 
         is_reg = chk.get("registered")
 
-        # ── Registered (Old User) → Silently cancel, fast 1-2s turnaround ──
+        # ── Registered (Old User) → 3 min delayed cancel with 1 min retry, worker continues hunting! ──
         if is_reg is True:
             w_state["registered"] += 1
             state["registered_count"] += 1
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Number {phone} is REGISTERED. Cancelling Server {current_server}...")
-            await otpd_cancel(client, api_key, act_id)
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Number {phone} is REGISTERED. Queued 3-min cancel with 1-min retry...")
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
@@ -1856,8 +1899,8 @@ async def run_single_key_worker(
         otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id)
         if not otp_res.get("ok"):
             err_str = otp_res.get("error", "Failed")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ OTP send failed: {err_str}. Cancelling silently for refund...")
-            await otpd_cancel(client, api_key, act_id)
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ OTP send failed: {err_str}. Queued cancel for refund...")
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
@@ -1872,7 +1915,7 @@ async def run_single_key_worker(
 
         while (time.time() - start_wait) < 180:
             if state.get("stop_flag") or not state.get("hunting"):
-                await otpd_cancel(client, api_key, act_id)
+                await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
                 w_state["active_id"] = None
                 return
 
@@ -1887,8 +1930,8 @@ async def run_single_key_worker(
             await asyncio.sleep(2)
 
         if not otp_code:
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone}. Cancelling silently...")
-            await otpd_cancel(client, api_key, act_id)
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone}. Sending cancel request...")
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
@@ -1945,8 +1988,8 @@ async def run_single_key_worker(
             w_state["active_id"] = None
         else:
             err_msg = login_res.get("error", "Login failed")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Meesho login failed: {err_msg}. Cancelling silently...")
-            await otpd_cancel(client, api_key, act_id)
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Meesho login failed: {err_msg}. Queued cancel...")
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
 
         await asyncio.sleep(1.0)
@@ -1954,7 +1997,7 @@ async def run_single_key_worker(
     # Clean up on worker exit
     act_id = w_state.get("active_id")
     if act_id:
-        await otpd_cancel(client, api_key, act_id)
+        await otpd_cancel(client, api_key, act_id, initial_delay=0)
         w_state["active_id"] = None
     w_state["status"] = "Stopped"
     print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Exited cleanly.")
