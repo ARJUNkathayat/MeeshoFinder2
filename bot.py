@@ -240,8 +240,10 @@ def get_user_config(chat_id: int | str) -> dict:
     configs = load_all_configs()
     cid = str(chat_id)
     if cid not in configs:
+        default_keys = [DEFAULT_OTP_DOCTOR_KEY] if DEFAULT_OTP_DOCTOR_KEY else []
         configs[cid] = {
             "api_key": DEFAULT_OTP_DOCTOR_KEY,
+            "api_keys": default_keys,
             "selected_servers": ["5841"],
             "custom_servers": {},
         }
@@ -252,14 +254,176 @@ def get_user_config(chat_id: int | str) -> dict:
 def update_user_config(chat_id: int | str, updates: dict):
     configs = load_all_configs()
     cid = str(chat_id)
+    default_keys = [DEFAULT_OTP_DOCTOR_KEY] if DEFAULT_OTP_DOCTOR_KEY else []
     cur = configs.get(cid, {
         "api_key": DEFAULT_OTP_DOCTOR_KEY,
+        "api_keys": default_keys,
         "selected_servers": ["5841"],
         "custom_servers": {},
     })
     cur.update(updates)
     configs[cid] = cur
     save_all_configs(configs)
+
+
+# ─── Multi-Key Management Helpers ─────────────────────────────────────────────
+def get_user_api_keys(chat_id: int | str) -> list[str]:
+    cfg = get_user_config(chat_id)
+    keys = cfg.get("api_keys")
+    if isinstance(keys, list) and len(keys) > 0:
+        valid = [k.strip() for k in keys if isinstance(k, str) and len(k.strip()) >= 8]
+        if valid:
+            return valid
+    single = (cfg.get("api_key") or DEFAULT_OTP_DOCTOR_KEY).strip()
+    if single and len(single) >= 8:
+        return [single]
+    return []
+
+
+def add_user_api_key(chat_id: int | str, new_key: str) -> list[str]:
+    keys = list(get_user_api_keys(chat_id))
+    cleaned = new_key.strip()
+    if cleaned and cleaned not in keys:
+        keys.append(cleaned)
+    primary = keys[0] if keys else ""
+    update_user_config(chat_id, {"api_keys": keys, "api_key": primary})
+    return keys
+
+
+def remove_user_api_key(chat_id: int | str, target: int | str) -> list[str]:
+    keys = list(get_user_api_keys(chat_id))
+    if isinstance(target, int):
+        if 0 <= target < len(keys):
+            keys.pop(target)
+    elif isinstance(target, str):
+        if target.isdigit():
+            idx = int(target) - 1
+            if 0 <= idx < len(keys):
+                keys.pop(idx)
+        elif target in keys:
+            keys.remove(target)
+    primary = keys[0] if keys else ""
+    update_user_config(chat_id, {"api_keys": keys, "api_key": primary})
+    return keys
+
+
+def clear_user_api_keys(chat_id: int | str):
+    update_user_config(chat_id, {"api_keys": [], "api_key": ""})
+
+
+# ─── Persistent Created Accounts Summary & History ────────────────────────────
+ACCOUNTS_LOCK = asyncio.Lock()
+ACCOUNTS_HISTORY_FILE = "accounts_history.json"
+ACCOUNTS_SUMMARY_TXT = os.path.join("accounts", "created_accounts_summary.txt")
+
+
+def load_accounts_history() -> list:
+    if os.path.exists(ACCOUNTS_HISTORY_FILE):
+        try:
+            with open(ACCOUNTS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_accounts_history(history: list):
+    try:
+        with open(ACCOUNTS_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Accounts History Save Error] {e}")
+
+
+def regenerate_accounts_summary_txt():
+    try:
+        os.makedirs("accounts", exist_ok=True)
+        history = load_accounts_history()
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            "================================================================================",
+            "                   MEESHO BOT - CREATED ACCOUNTS SUMMARY REPORT",
+            "================================================================================",
+            f"Report Generated At : {now_str}",
+            f"Total Accounts Logged: {len(history)}",
+            "--------------------------------------------------------------------------------",
+            f"{'#':<4} | {'Mobile Number':<14} | {'User ID':<18} | {'Server':<8} | {'Worker':<12} | {'Date & Time':<20}",
+            "--------------------------------------------------------------------------------",
+        ]
+        for item in history:
+            idx = item.get("id", 1)
+            phone = item.get("phone", "")
+            uid = item.get("user_id", "")
+            srv = item.get("server", "")
+            w_label = f"Worker #{item.get('worker_id', 1)}"
+            dt = item.get("created_at", "")
+            lines.append(f"{idx:<4} | +91{phone:<11} | {str(uid):<18} | {str(srv):<8} | {w_label:<12} | {dt:<20}")
+        lines.append("================================================================================")
+        with open(ACCOUNTS_SUMMARY_TXT, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception as e:
+        print(f"[Regenerate Summary Error] {e}")
+
+
+async def record_created_account(phone: str, user_id: str, server: str, worker_id: int, key_preview: str, file_path: str):
+    async with ACCOUNTS_LOCK:
+        history = load_accounts_history()
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry = {
+            "id": len(history) + 1,
+            "phone": phone,
+            "user_id": str(user_id),
+            "server": str(server),
+            "worker_id": worker_id,
+            "key_preview": key_preview,
+            "created_at": now_str,
+            "timestamp": time.time(),
+            "file_path": file_path,
+        }
+        history.append(entry)
+        save_accounts_history(history)
+        regenerate_accounts_summary_txt()
+
+
+def generate_accounts_summary_text() -> str:
+    history = load_accounts_history()
+    total = len(history)
+    today_prefix = time.strftime("%Y-%m-%d")
+    today_count = sum(1 for x in history if x.get("created_at", "").startswith(today_prefix))
+
+    server_counts = {}
+    worker_counts = {}
+    for x in history:
+        s = str(x.get("server", "Unknown"))
+        server_counts[s] = server_counts.get(s, 0) + 1
+        w = f"Worker #{x.get('worker_id', 1)}"
+        worker_counts[w] = worker_counts.get(w, 0) + 1
+
+    srv_breakdown = ", ".join(f"Server {s}: {cnt}" for s, cnt in server_counts.items()) if server_counts else "None"
+    worker_breakdown = ", ".join(f"{w}: {cnt}" for w, cnt in worker_counts.items()) if worker_counts else "None"
+
+    recent = history[-5:]
+    recent_lines = []
+    if recent:
+        for it in reversed(recent):
+            recent_lines.append(
+                f"• <code>+91{it.get('phone')}</code> | UID: <code>{it.get('user_id')}</code> | Srv: <code>{it.get('server')}</code> | W#{it.get('worker_id')} (<i>{it.get('created_at', '')[-8:]}</i>)"
+            )
+    recent_text = "\n".join(recent_lines) if recent_lines else "<i>No accounts created yet.</i>"
+
+    summary_msg = (
+        f"📋 <b>MEESHO ACCOUNTS MASTER SUMMARY</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Total Accounts Created:</b> <b>{total}</b>\n"
+        f"📅 <b>Created Today ({today_prefix}):</b> <b>{today_count}</b>\n\n"
+        f"🏷️ <b>Server Breakdown:</b> {srv_breakdown}\n"
+        f"⚡ <b>Worker Breakdown:</b> {worker_breakdown}\n\n"
+        f"🕒 <b>Latest Created Accounts:</b>\n{recent_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📁 <i>Niche detailed <code>created_accounts_summary.txt</code> report file attach ki gayi hai.</i>"
+    )
+    return summary_msg
+
 
 
 # ─── Persistent Store & Order Storage ─────────────────────────────────────────
@@ -1296,11 +1460,11 @@ def sync_to_sell_store(account_data: dict, phone: str) -> dict:
 ADMIN_MAIN_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": "🚀 Start Hunt"}, {"text": "📱 Check My Number"}],
-        [{"text": "⚙️ Select Servers"}, {"text": "🔑 Set API Key"}],
+        [{"text": "⚙️ Select Servers"}, {"text": "🔑 Manage Keys"}],
+        [{"text": "📋 Accounts Summary"}, {"text": "📊 Stats"}],
         [{"text": "📝 Set JSON Format"}, {"text": "🔄 Convert JSON"}],
         [{"text": "⚙️ Store Settings"}, {"text": "📦 View Orders"}],
-        [{"text": "📊 Stats"}, {"text": "💰 Balance"}],
-        [{"text": "🛑 Stop Hunt"}],
+        [{"text": "💰 Balance"}, {"text": "🛑 Stop Hunt"}],
     ],
     "resize_keyboard": True,
 }
@@ -1547,172 +1711,169 @@ def build_server_selection_keyboard(selected_servers: list, all_known: dict):
     return {"keyboard": buttons, "resize_keyboard": True}
 
 
-# ─── Dual Server Hunter Task ──────────────────────────────────────────────────
-async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
-    state = ACTIVE_TASKS.get(chat_id)
-    if not state or not state["hunting"]:
-        return
+# ─── Multi-Key UI Helpers ─────────────────────────────────────────────────────
+async def build_keys_view_message_and_markup(client: httpx.AsyncClient, chat_id: int | str):
+    keys = get_user_api_keys(chat_id)
+    lines = [
+        "🔑 <b>OTP DOCTOR MULTI-KEY MANAGEMENT</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "Aap ek se zyada (multiple) API keys add kar sakte hain.\nHar key ka <b>alag worker parallel chalega (1-2s speed)</b> bina kisi collision ke!\n",
+    ]
+    if not keys:
+        lines.append("❌ <b>Koi API Key add nahi hai.</b>\nNiche <b>➕ Add New Key</b> par click karein.")
+    else:
+        lines.append(f"⚡ <b>Total Configured Keys:</b> <code>{len(keys)}</code>\n")
+        for idx, k in enumerate(keys, start=1):
+            bal = await otpd_balance(client, k)
+            masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
+            lines.append(f"• <b>Key #{idx}:</b> <code>{masked}</code> | Balance: <b>₹{bal}</b> (<code>Worker #{idx}</code>)")
 
-    cfg = get_user_config(chat_id)
-    api_key = (cfg.get("api_key") or "").strip()
-    if not api_key:
-        state["hunting"] = False
-        await send_tg_message(
-            client,
-            chat_id,
-            "⚠️ <b>OTP Doctor API Key Required!</b>\n\n"
-            "Aapne abhi tak apna OTP Doctor API Key set nahi kiya hai.\n"
-            "👉 Kripya <b>🔑 Set API Key</b> button dabayein ya <code>/setkey &lt;your_key&gt;</code> bhejein.",
-            reply_markup=MAIN_MENU_KEYBOARD,
-        )
-        return
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("👇 <i>Niche button dabakar actions choose karein:</i>")
 
-    servers = cfg.get("selected_servers", ["5841"])
-    if not servers:
-        servers = ["5841"]
-        update_user_config(chat_id, {"selected_servers": servers})
+    inline_kb = {
+        "inline_keyboard": [
+            [
+                {"text": "➕ Add New Key", "callback_data": "add_key_prompt"},
+                {"text": "🗑️ Delete Key", "callback_data": "del_key_prompt"},
+            ],
+            [
+                {"text": "🔄 Refresh Balances", "callback_data": "refresh_keys"},
+                {"text": "🧹 Clear All Keys", "callback_data": "clear_keys_prompt"},
+            ],
+        ]
+    }
+    return "\n".join(lines), inline_kb
 
-    # Limit to max 2 servers
-    servers = servers[:2]
 
-    bal = await otpd_balance(client, api_key)
-    server_names = ", ".join(f"Server {s}" for s in servers)
-    await send_tg_message(
-        client,
-        chat_id,
-        f"🎯 <b>Multi-Server Hunting Started!</b>\n\n"
-        f"🏷️ <b>Active Servers (Max 2):</b> <code>{server_names}</code>\n"
-        f"🔄 <b>Mode:</b> Dual-Server Alternating Buy → Web Check → Auto-Cancel Old → Crowstack OTP Send → Auto SMS → Export JSON!\n"
-        f"💰 <b>Wallet Balance:</b> ₹{bal}\n\n"
-        f"<i>Current stats ke liye <b>/stats</b> dabayein.\nRokne ke liye <b>/stop</b> dabayein.</i>",
-    )
+# ─── Multi-Key Concurrent Worker Engine ───────────────────────────────────────
+async def run_single_key_worker(
+    client: httpx.AsyncClient,
+    chat_id: int | str,
+    worker_id: int,
+    api_key: str,
+    servers: list,
+    state: dict,
+):
+    key_preview = api_key[:4] + "..." + api_key[-4:] if len(api_key) >= 8 else api_key
+    w_state = state["worker_states"][worker_id]
+    w_state["status"] = "Running"
+    server_idx = (worker_id - 1) % len(servers)
 
-    state["attempts"] = 0
-    state["registered_count"] = 0
-    state["accounts_created"] = 0
-    state["start_time"] = time.time()
-    state["last_summary_time"] = time.time()
-    server_idx = 0
+    print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Started with Key: {key_preview} on servers: {servers}")
 
     while state.get("hunting") and not state.get("stop_flag"):
-        # Select server in round-robin fashion
         current_server = servers[server_idx % len(servers)]
         server_idx += 1
 
+        w_state["attempts"] += 1
         state["attempts"] += 1
-        att_num = state["attempts"]
-        print(f"[{time.strftime('%H:%M:%S')}] Attempt #{att_num}: Buying number from Server {current_server}...")
+        att_num = w_state["attempts"]
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Attempt #{att_num}: Buying number from Server {current_server} (Key {key_preview})...")
 
         res = await otpd_buy(client, api_key, current_server)
 
-        if not res["ok"]:
+        if not res.get("ok"):
             err = res.get("error", "Unknown error")
-            print(f"[{time.strftime('%H:%M:%S')}] Server {current_server} Buy error: {err}")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Server {current_server} Buy error: {err}")
 
             if "NO_BALANCE" in err:
+                w_state["status"] = "No Balance (Waiting)"
                 await send_tg_message(
                     client,
                     chat_id,
-                    f"⚠️ <b>Balance Kam Hai!</b> (Server {current_server})\nCancel refund aane ka wait kar rahe hain (har 2 min mein recheck)...",
+                    f"⚠️ <b>Worker #{worker_id} Low Balance!</b> (Key: <code>{key_preview}</code> | Server: {current_server})\nCancel refund aane ka wait kar rahe hain...",
                 )
                 refund_done = False
                 for _ in range(5):
-                    if state.get("stop_flag"):
+                    if state.get("stop_flag") or not state.get("hunting"):
                         break
-                    await asyncio.sleep(120)
+                    await asyncio.sleep(60)
                     new_bal = await otpd_balance(client, api_key)
                     try:
                         if float(new_bal) >= 10.0:
                             await send_tg_message(
                                 client,
                                 chat_id,
-                                f"✅ <b>Refund aa gaya!</b> Naya Balance: ₹{new_bal}\nHunting continue kar rahe hain...",
+                                f"✅ <b>Worker #{worker_id} Refund aa gaya!</b> Key: <code>{key_preview}</code> Naya Balance: ₹{new_bal}\nHunting continue...",
                             )
+                            w_state["status"] = "Running"
                             refund_done = True
                             break
                     except ValueError:
                         pass
                 if not refund_done:
+                    w_state["status"] = "Paused (Insufficient Balance)"
                     await send_tg_message(
                         client,
                         chat_id,
-                        f"❌ <b>Balance insufficient!</b> Current Balance: ₹{await otpd_balance(client, api_key)}\nKripya recharge karein ya /stop karein.",
+                        f"❌ <b>Worker #{worker_id} Paused!</b> Key <code>{key_preview}</code> balance insufficient. Baaki workers chalte rahenge.",
                     )
                     break
                 continue
 
             if "NO_NUMBERS" in err or "TRY_AGAIN" in err:
-                await asyncio.sleep(1.2)
+                await asyncio.sleep(1.0)
                 continue
 
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.2)
             continue
 
         act_id = res["id"]
         phone = res["phone"]
-        state["active_id"] = act_id
-        print(f"[{time.strftime('%H:%M:%S')}] Got number: {phone} (ID: {act_id}, Server: {current_server}) — checking registration...")
+        w_state["active_id"] = act_id
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Got number: {phone} (ID: {act_id}, Server: {current_server}) — checking registration...")
 
         chk = await check_meesho_reg(client, phone)
-        if not chk["ok"]:
+        if not chk.get("ok"):
             await asyncio.sleep(1.0)
             chk = await check_meesho_reg(client, phone)
 
-        # 🚨 Both registration checker APIs failed / down!
-        if not chk["ok"]:
+        if not chk.get("ok"):
             err_detail = chk.get("error", "Both checker endpoints down")
-            print(f"[{time.strftime('%H:%M:%S')}] 🚨 Web Checker APIs failed: {err_detail}. Alerting user...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🚨 Checker failed: {err_detail}. Cancelling {phone}...")
             await otpd_cancel(client, api_key, act_id)
-            state["active_id"] = None
-            await send_tg_message(
-                client,
-                chat_id,
-                f"🚨 <b>ALERT: Web Registration Checker Down!</b>\n\n"
-                f"⚠️ Dono checker APIs (Primary & Fallback) respond nahi kar rahi hain:\n"
-                f"<code>Error: {err_detail}</code>\n\n"
-                f"🛡️ Aapka balance safe rakhne ke liye number <code>+91{phone}</code> cancel kar diya gaya hai taaki koi loss na ho.\n\n"
-                f"Hunting temporarily pause kar di gayi hai. Checker live hone par dobara <b>🚀 Start Hunt</b> karein.",
-                reply_markup=MAIN_MENU_KEYBOARD,
-            )
-            state["hunting"] = False
-            break
+            w_state["active_id"] = None
+            await asyncio.sleep(1.0)
+            continue
 
         is_reg = chk.get("registered")
 
-        # ── Registered (Old User) → Silently cancel, wait for refund ──
+        # ── Registered (Old User) → Silently cancel, fast 1-2s turnaround ──
         if is_reg is True:
+            w_state["registered"] += 1
             state["registered_count"] += 1
-            print(f"[{time.strftime('%H:%M:%S')}] Number {phone} is REGISTERED. Cancelling Server {current_server}...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Number {phone} is REGISTERED. Cancelling Server {current_server}...")
             await otpd_cancel(client, api_key, act_id)
-            state["active_id"] = None
-            await asyncio.sleep(1.0)  # Fast turnaround 1s
+            w_state["active_id"] = None
+            await asyncio.sleep(1.0)
             continue
 
         # ── FRESH / UNREGISTERED NUMBER FOUND! ──
-        print(f"[{time.strftime('%H:%M:%S')}] 🎉 FRESH NUMBER FOUND: {phone} (ID: {act_id}, Server: {current_server}) — Starting OTP login...")
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🎉 FRESH NUMBER FOUND: {phone} (Server: {current_server}) — Starting OTP login...")
 
         dev = mk_device()
         otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id)
         if not otp_res.get("ok"):
             err_str = otp_res.get("error", "Failed")
-            print(f"[{time.strftime('%H:%M:%S')}] ❌ OTP send failed: {err_str}. Cancelling silently for refund...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ OTP send failed: {err_str}. Cancelling silently for refund...")
             await otpd_cancel(client, api_key, act_id)
-            state["active_id"] = None
-            await asyncio.sleep(1.2)
+            w_state["active_id"] = None
+            await asyncio.sleep(1.0)
             continue
 
         session_dict = otp_res["session"]
-        print(f"[{time.strftime('%H:%M:%S')}] ⏳ OTP sent to {phone}! Waiting for SMS...")
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ OTP sent to {phone}! Waiting for SMS...")
 
-        # ── Step 3: Poll OTP Doctor for incoming SMS ──
+        # Poll OTP Doctor for incoming SMS
         otp_code = None
         sms_text = ""
         start_wait = time.time()
 
         while (time.time() - start_wait) < 180:
-            if state.get("stop_flag"):
+            if state.get("stop_flag") or not state.get("hunting"):
                 await otpd_cancel(client, api_key, act_id)
-                state["active_id"] = None
+                w_state["active_id"] = None
                 return
 
             sms_res = await otpd_get_sms(client, api_key, act_id)
@@ -1721,22 +1882,23 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
                 digits = re.findall(r"\b\d{4,6}\b", sms_text)
                 if digits:
                     otp_code = digits[0]
-                    print(f"[{time.strftime('%H:%M:%S')}] 🔑 Extracted OTP: {otp_code}")
+                    print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🔑 Extracted OTP: {otp_code}")
                     break
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
 
         if not otp_code:
-            print(f"[{time.strftime('%H:%M:%S')}] ⏰ SMS Timeout for {phone}. Cancelling silently for refund...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone}. Cancelling silently...")
             await otpd_cancel(client, api_key, act_id)
-            state["active_id"] = None
-            await asyncio.sleep(1.2)
+            w_state["active_id"] = None
+            await asyncio.sleep(1.0)
             continue
 
-        # ── Step 4: Verify OTP & Login to Meesho ──
-        print(f"[{time.strftime('%H:%M:%S')}] 🔐 Verifying OTP {otp_code} for {phone}...")
+        # Verify OTP & Login to Meesho
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🔐 Verifying OTP {otp_code} for {phone}...")
         login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev)
 
         if login_res.get("ok"):
+            w_state["accounts"] += 1
             state["accounts_created"] += 1
             user_id = login_res.get("user_id")
 
@@ -1753,12 +1915,17 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             with open(fname, "w", encoding="utf-8") as f:
                 f.write(json_str)
 
-            # 🛒 Auto-Sync to TelegramBotSell Store Stock
+            # Record in Master Account Summary File & DB
+            await record_created_account(phone, user_id, current_server, worker_id, key_preview, fname)
+
+            # Sync to TelegramBotSell Store Stock
             sync_res = sync_to_sell_store(account_data, phone)
             store_tag = f"\n🛒 <b>Auto-Stocked in Sell Bot:</b> ✅ Live (Total Stock: {sync_res.get('stock', 1)})" if sync_res.get("ok") else ""
 
             account_msg = (
-                f"🎉 <b>MEESHO ACCOUNT SUCCESSFULLY CREATED!</b>\n\n"
+                f"🎉 <b>MEESHO ACCOUNT SUCCESSFULLY CREATED!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚡ <b>Worker:</b> <code>Worker #{worker_id} (Key: {key_preview})</code>\n"
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
                 f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
                 f"🏷️ <b>Server:</b> <code>{current_server}</code>{store_tag}\n\n"
@@ -1772,32 +1939,129 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
                 chat_id,
                 filename=f"meesho_{phone}.json",
                 content=json_str,
-                caption=f"✅ Meesho Account: +91{phone} (Server {current_server})",
+                caption=f"✅ Meesho Account: +91{phone} (Worker #{worker_id} | Server {current_server})",
             )
 
-            state["active_id"] = None
+            w_state["active_id"] = None
         else:
             err_msg = login_res.get("error", "Login failed")
-            print(f"[{time.strftime('%H:%M:%S')}] ❌ Meesho login failed: {err_msg}. Cancelling silently...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Meesho login failed: {err_msg}. Cancelling silently...")
             await otpd_cancel(client, api_key, act_id)
-            state["active_id"] = None
+            w_state["active_id"] = None
 
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.0)
 
-    state["hunting"] = False
-    state["active_id"] = None
-    final_bal = await otpd_balance(client, api_key)
-    total_time_mins = int((time.time() - state.get("start_time", time.time())) // 60)
+    # Clean up on worker exit
+    act_id = w_state.get("active_id")
+    if act_id:
+        await otpd_cancel(client, api_key, act_id)
+        w_state["active_id"] = None
+    w_state["status"] = "Stopped"
+    print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Exited cleanly.")
+
+
+# ─── Dual Server Multi-Key Hunter Task ────────────────────────────────────────
+async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
+    state = ACTIVE_TASKS.get(chat_id)
+    if not state or not state["hunting"]:
+        return
+
+    keys = get_user_api_keys(chat_id)
+    if not keys:
+        state["hunting"] = False
+        await send_tg_message(
+            client,
+            chat_id,
+            "⚠️ <b>OTP Doctor API Key Required!</b>\n\n"
+            "Aapne abhi tak koi API Key add nahi kiya hai.\n"
+            "👉 Kripya <b>🔑 Manage Keys</b> button dabayein ya <code>/addkey &lt;your_key&gt;</code> bhejein.",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        return
+
+    cfg = get_user_config(chat_id)
+    servers = cfg.get("selected_servers", ["5841"])
+    if not servers:
+        servers = ["5841"]
+        update_user_config(chat_id, {"selected_servers": servers})
+
+    servers = servers[:2]
+    server_names = ", ".join(f"Server {s}" for s in servers)
+
+    state["attempts"] = 0
+    state["registered_count"] = 0
+    state["accounts_created"] = 0
+    state["start_time"] = time.time()
+    state["worker_states"] = {}
+    state["stop_flag"] = False
+
+    # Fetch balances for all keys and prepare workers
+    key_lines = []
+    worker_tasks = []
+    for idx, key in enumerate(keys, start=1):
+        bal = await otpd_balance(client, key)
+        masked = key[:4] + "..." + key[-4:] if len(key) >= 8 else key
+        key_lines.append(f"• <b>Worker #{idx}:</b> <code>{masked}</code> (₹{bal})")
+        state["worker_states"][idx] = {
+            "active_id": None,
+            "attempts": 0,
+            "accounts": 0,
+            "registered": 0,
+            "status": "Starting",
+            "key_preview": masked,
+            "api_key": key,
+        }
+
+    keys_str = "\n".join(key_lines)
     await send_tg_message(
         client,
         chat_id,
-        f"🏁 <b>Hunting Session Stopped!</b>\n\n"
+        f"🎯 <b>Multi-Key Concurrent Hunting Started!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ <b>Active Concurrent Workers:</b> <b>{len(keys)} Workers</b>\n"
+        f"🏷️ <b>Selected Servers (Max 2):</b> <code>{server_names}</code>\n"
+        f"⚡ <b>Check Interval:</b> <code>1-2 Seconds (High Speed)</code>\n\n"
+        f"🔑 <b>Configured API Keys:</b>\n{keys_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>📊 Live stats ke liye <b>/stats</b>\n📋 Summary report ke liye <b>/summary</b>\n🛑 Rokne ke liye <b>/stop</b> dabayein.</i>",
+    )
+
+    for idx, key in enumerate(keys, start=1):
+        t = asyncio.create_task(
+            run_single_key_worker(client, chat_id, idx, key, servers, state)
+        )
+        worker_tasks.append(t)
+
+    # Wait for all workers to finish
+    if worker_tasks:
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+    state["hunting"] = False
+    state["active_id"] = None
+    total_time_mins = int((time.time() - state.get("start_time", time.time())) // 60)
+
+    # Final summary of workers
+    final_worker_lines = []
+    for idx, key in enumerate(keys, start=1):
+        w_st = state["worker_states"].get(idx, {})
+        w_bal = await otpd_balance(client, key)
+        final_worker_lines.append(
+            f"• <b>Worker #{idx} ({w_st.get('key_preview', '')}):</b> {w_st.get('attempts', 0)} attempts | {w_st.get('accounts', 0)} created | Bal: ₹{w_bal}"
+        )
+    w_summary = "\n".join(final_worker_lines)
+
+    await send_tg_message(
+        client,
+        chat_id,
+        f"🏁 <b>Hunting Session Stopped!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⏱️ <b>Total Runtime:</b> {total_time_mins} minutes\n"
-        f"🔄 <b>Total Attempts:</b> {state.get('attempts', 0)}\n"
-        f"❌ <b>Registered (Cancelled):</b> {state.get('registered_count', 0)}\n"
-        f"🎉 <b>Accounts Created:</b> {state.get('accounts_created', 0)}\n"
-        f"💰 <b>Final Balance:</b> ₹{final_bal}\n\n"
-        f"Dobara chalane ke liye <b>🚀 Start Hunt</b> dabayein.",
+        f"🔄 <b>Total Combined Attempts:</b> {state.get('attempts', 0)}\n"
+        f"❌ <b>Registered Cancelled:</b> {state.get('registered_count', 0)}\n"
+        f"🎉 <b>Total Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n\n"
+        f"📊 <b>Per-Worker Performance:</b>\n{w_summary}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Summary report dekhne ke liye <b>/summary</b> dabayein.\nDobara chalane ke liye <b>🚀 Start Hunt</b>.</i>",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -2295,6 +2559,59 @@ async def bot_loop():
                                 f"👉 <i>Naya numeric price bhejein (jaise: <code>99</code> ya <code>149</code>):</i>",
                                 reply_markup=cancel_markup,
                             )
+                            continue
+
+                        elif cb_data == "add_key_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_add_key"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                "➕ <b>Naya OTP Doctor API Key bhejein:</b>\n\n<i>(OTP Doctor dashboard se copy karke yahan paste karein. Yeh key parallel worker ke roop mein add ho jayegi)</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        elif cb_data == "del_key_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            keys = get_user_api_keys(cb_chat_id)
+                            if not keys:
+                                await answer_tg_callback(client, cb_id, "⚠️ Koi key configured nahi hai!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_del_key"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            key_list_str = "\n".join(f"• <b>Key #{i}:</b> <code>{k[:4]}...{k[-4:]}</code>" for i, k in enumerate(keys, start=1))
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"🗑️ <b>Delete API Key:</b>\n\n{key_list_str}\n\n👉 <i>Delete karne ke liye Key Number bhejein (jaise: <code>1</code> ya <code>2</code>) ya command <code>/delkey 1</code> bhejein.</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        elif cb_data == "refresh_keys":
+                            await answer_tg_callback(client, cb_id, "🔄 Updating balances...")
+                            keys_text, keys_kb = await build_keys_view_message_and_markup(client, cb_chat_id)
+                            await send_tg_message(client, cb_chat_id, keys_text, reply_markup=keys_kb)
+                            continue
+
+                        elif cb_data == "clear_keys_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            clear_user_api_keys(cb_chat_id)
+                            await answer_tg_callback(client, cb_id, "🧹 Sabhi keys clear ho gayi!")
+                            keys_text, keys_kb = await build_keys_view_message_and_markup(client, cb_chat_id)
+                            await send_tg_message(client, cb_chat_id, keys_text, reply_markup=keys_kb)
                             continue
 
                         else:
@@ -2940,14 +3257,73 @@ async def bot_loop():
                             else:
                                 await send_tg_message(client, chat_id, f"❌ Order {oid} not found.")
 
-                    # ── 🔑 Set API Key ──
-                    elif text.startswith("/setkey") or text == "🔑 Set API Key":
+                    # ── 🔑 Multi-Key Management (/keys, /addkey, /delkey, /clearkeys, /setkey) ──
+                    elif text in ("🔑 Manage Keys", "🔑 Set API Key", "/keys", "/managekeys"):
+                        keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
+                        await send_tg_message(client, chat_id, keys_text, reply_markup=keys_kb)
+
+                    elif text.startswith("/addkey"):
                         parts = text.split(maxsplit=1)
-                        if len(parts) == 2 and len(parts[1].strip()) >= 10:
+                        if len(parts) == 2 and len(parts[1].strip()) >= 8:
+                            cand_key = parts[1].strip()
+                            test_bal = await otpd_balance(client, cand_key)
+                            if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
+                                add_user_api_key(chat_id, cand_key)
+                                keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"✅ <b>Naya API Key Successfully Add ho gaya!</b>\n💰 <b>Key Balance:</b> ₹{test_bal}\n\n{keys_text}",
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                )
+                            else:
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"❌ <b>Invalid API Key!</b> OTP Doctor error: <code>{test_bal}</code>\nKripya sahi key bhejein.",
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                )
+                        else:
+                            state["manual_step"] = "awaiting_add_key"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "➕ <b>Naya OTP Doctor API Key bhejein:</b>\n<i>(OTP Doctor dashboard se copy karke yahan paste karein)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif text.startswith("/delkey"):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2:
+                            target = parts[1].strip()
+                            remove_user_api_key(chat_id, target)
+                            keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🗑️ <b>Key Successfully Removed!</b>\n\n{keys_text}",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/delkey &lt;key_number_or_string&gt;</code> (jaise: <code>/delkey 1</code>)")
+
+                    elif text in ("/clearkeys", "/clearallkeys"):
+                        clear_user_api_keys(chat_id)
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            "🧹 <b>Sabhi API Keys Clear kar di gayi hain!</b> Nayi key add karne ke liye <b>🔑 Manage Keys</b> dabayein.",
+                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                        )
+
+                    elif text.startswith("/setkey"):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and len(parts[1].strip()) >= 8:
                             new_key = parts[1].strip()
                             test_bal = await otpd_balance(client, new_key)
                             if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
-                                update_user_config(chat_id, {"api_key": new_key})
+                                add_user_api_key(chat_id, new_key)
                                 await send_tg_message(
                                     client,
                                     chat_id,
@@ -2962,7 +3338,7 @@ async def bot_loop():
                                     reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                                 )
                         else:
-                            state["manual_step"] = "awaiting_api_key"
+                            state["manual_step"] = "awaiting_add_key"
                             cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
                             await send_tg_message(
                                 client,
@@ -2971,16 +3347,17 @@ async def bot_loop():
                                 reply_markup=cancel_markup,
                             )
 
-                    elif state.get("manual_step") == "awaiting_api_key":
+                    elif state.get("manual_step") == "awaiting_add_key":
                         candidate_key = text.strip()
                         test_bal = await otpd_balance(client, candidate_key)
                         if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
-                            update_user_config(chat_id, {"api_key": candidate_key})
+                            add_user_api_key(chat_id, candidate_key)
                             state["manual_step"] = None
+                            keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
                             await send_tg_message(
                                 client,
                                 chat_id,
-                                f"🎉 <b>API Key Verified & Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}",
+                                f"🎉 <b>API Key Verified & Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}\n\n{keys_text}",
                                 reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                             )
                         else:
@@ -2989,6 +3366,38 @@ async def bot_loop():
                                 chat_id,
                                 f"❌ <b>API Key Invalid!</b> Error: <code>{test_bal}</code>\nDobara sahi key bhejein ya /cancel karein.",
                             )
+
+                    elif state.get("manual_step") == "awaiting_del_key":
+                        del_target = text.strip()
+                        remove_user_api_key(chat_id, del_target)
+                        state["manual_step"] = None
+                        keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            f"🗑️ <b>API Key Successfully Deleted!</b>\n\n{keys_text}",
+                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                        )
+
+                    # ── 📋 Accounts Summary & History Report (/summary, /accounts) ──
+                    elif text in ("📋 Accounts Summary", "/summary", "/accounts", "/report"):
+                        regenerate_accounts_summary_txt()
+                        sum_text = generate_accounts_summary_text()
+                        await send_tg_message(client, chat_id, sum_text, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+
+                        if os.path.exists(ACCOUNTS_SUMMARY_TXT) and os.path.getsize(ACCOUNTS_SUMMARY_TXT) > 0:
+                            try:
+                                with open(ACCOUNTS_SUMMARY_TXT, "r", encoding="utf-8") as f:
+                                    txt_content = f.read()
+                                await send_tg_document(
+                                    client,
+                                    chat_id,
+                                    filename="created_accounts_summary.txt",
+                                    content=txt_content,
+                                    caption="📋 <b>Meesho Created Accounts Official Summary Report</b>",
+                                )
+                            except Exception as e:
+                                print(f"[Send Summary File Error] {e}")
 
                     # ── 📝 Set JSON Format Template ──
                     elif text.startswith("/setjson") or text == "📝 Set JSON Format":
@@ -3222,63 +3631,101 @@ async def bot_loop():
 
                     # ── 📊 Stats ──
                     elif text.startswith("/stats") or text == "📊 Stats":
-                        api_key = (cfg.get("api_key") or "").strip()
-                        b = await otpd_balance(client, api_key) if api_key else "Not set"
+                        keys = get_user_api_keys(chat_id)
                         sel_servers = cfg.get("selected_servers", ["5841"])
+                        server_names = ", ".join(f"Server {s}" for s in sel_servers)
+
                         if state and state.get("hunting"):
                             runtime_mins = int((time.time() - state.get("start_time", time.time())) // 60)
+                            worker_lines = []
+                            for idx, k in enumerate(keys, start=1):
+                                w_st = state.get("worker_states", {}).get(idx, {})
+                                w_bal = await otpd_balance(client, k)
+                                worker_lines.append(
+                                    f"• <b>Worker #{idx} ({w_st.get('key_preview', k[:4]+'...')})</b>: <code>{w_st.get('status', 'Running')}</code> | Att: {w_st.get('attempts', 0)} | Created: {w_st.get('accounts', 0)} | Bal: ₹{w_bal}"
+                                )
+                            w_details = "\n".join(worker_lines) if worker_lines else "<i>No active workers</i>"
                             stats_text = (
-                                f"📊 <b>LIVE DUAL-SERVER HUNTING STATS</b>\n\n"
-                                f"⚡ <b>Status:</b> 🟢 Running\n"
+                                f"📊 <b>LIVE MULTI-KEY HUNTING STATS</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"⚡ <b>Status:</b> 🟢 Running ({len(keys)} Parallel Workers)\n"
                                 f"⏱️ <b>Uptime:</b> {runtime_mins} minutes\n"
-                                f"🏷️ <b>Active Servers:</b> {', '.join(sel_servers)}\n"
-                                f"🔄 <b>Total Attempts:</b> {state.get('attempts', 0)}\n"
-                                f"❌ <b>Registered (Cancelled):</b> {state.get('registered_count', 0)}\n"
-                                f"🎉 <b>Accounts Created:</b> {state.get('accounts_created', 0)}\n"
-                                f"💰 <b>Wallet Balance:</b> ₹{b}"
+                                f"🏷️ <b>Active Servers:</b> <code>{server_names}</code>\n"
+                                f"🔄 <b>Total Combined Attempts:</b> {state.get('attempts', 0)}\n"
+                                f"❌ <b>Registered Numbers Cancelled:</b> {state.get('registered_count', 0)}\n"
+                                f"🎉 <b>Total Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n\n"
+                                f"⚡ <b>Per-Worker Live Performance:</b>\n{w_details}\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"<i>Full report ke liye <b>/summary</b> dabayein.</i>"
                             )
                         else:
+                            key_balances = []
+                            total_bal = 0.0
+                            for idx, k in enumerate(keys, start=1):
+                                bal = await otpd_balance(client, k)
+                                masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
+                                key_balances.append(f"• <b>Key #{idx} ({masked}):</b> ₹{bal}")
+                                try:
+                                    total_bal += float(bal)
+                                except ValueError:
+                                    pass
+                            k_bal_str = "\n".join(key_balances) if key_balances else "<i>No keys configured</i>"
                             stats_text = (
-                                f"📊 <b>BOT STATS</b>\n\n"
+                                f"📊 <b>BOT MASTER STATS</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"⚡ <b>Status:</b> ⚪ Idle (Not running)\n"
-                                f"🏷️ <b>Configured Servers:</b> {', '.join(sel_servers)}\n"
+                                f"🔑 <b>Configured Keys:</b> {len(keys)} Keys\n"
+                                f"🏷️ <b>Configured Servers:</b> <code>{server_names}</code>\n"
                                 f"🔄 <b>Last Session Attempts:</b> {state.get('attempts', 0) if state else 0}\n"
-                                f"🎉 <b>Accounts Created:</b> {state.get('accounts_created', 0) if state else 0}\n"
-                                f"💰 <b>Wallet Balance:</b> ₹{b}\n\n"
+                                f"🎉 <b>Last Session Created:</b> {state.get('accounts_created', 0) if state else 0}\n\n"
+                                f"💰 <b>Key Balances:</b>\n{k_bal_str}\n"
+                                f"💵 <b>Total Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"Start karne ke liye <b>🚀 Start Hunt</b> dabayein."
                             )
                         await send_tg_message(client, chat_id, stats_text)
 
                     # ── 💰 Balance ──
                     elif text.startswith("/balance") or text == "💰 Balance":
-                        api_key = (cfg.get("api_key") or "").strip()
-                        if not api_key:
+                        keys = get_user_api_keys(chat_id)
+                        if not keys:
                             await send_tg_message(
                                 client,
                                 chat_id,
-                                "⚠️ <b>API Key Set Nahi Hai!</b>\nKripya pehle <b>🔑 Set API Key</b> button dabayein ya <code>/setkey &lt;your_key&gt;</code> bhejein.",
+                                "⚠️ <b>API Key Set Nahi Hai!</b>\nKripya pehle <b>🔑 Manage Keys</b> button dabayein ya <code>/addkey &lt;your_key&gt;</code> bhejein.",
                                 reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                             )
                             continue
-                        b = await otpd_balance(client, api_key)
-                        masked_key = api_key[:4] + "..." + api_key[-4:] if len(api_key) >= 8 else api_key
-                        await send_tg_message(
-                            client,
-                            chat_id,
-                            f"💰 <b>OTP Doctor Balance:</b> ₹{b}\n🔑 <b>Active Key:</b> <code>{masked_key}</code>",
-                        )
+
+                        lines = ["💰 <b>OTP DOCTOR BALANCES:</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━"]
+                        total_bal = 0.0
+                        for idx, key in enumerate(keys, start=1):
+                            bal = await otpd_balance(client, key)
+                            masked = key[:4] + "..." + key[-4:] if len(key) >= 8 else key
+                            lines.append(f"• <b>Key #{idx}</b> (<code>{masked}</code>): <b>₹{bal}</b> (<code>Worker #{idx}</code>)")
+                            try:
+                                total_bal += float(bal)
+                            except ValueError:
+                                pass
+                        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        lines.append(f"💵 <b>Total Combined Balance:</b> <b>₹{total_bal:.2f}</b>")
+                        await send_tg_message(client, chat_id, "\n".join(lines))
 
                     # ── 🛑 Stop Hunt ──
                     elif text.startswith("/stop") or text == "🛑 Stop Hunt":
                         if state.get("hunting"):
                             state["stop_flag"] = True
-                            act_id = state.get("active_id")
-                            if act_id:
-                                api_key = cfg.get("api_key", DEFAULT_OTP_DOCTOR_KEY)
-                                await send_tg_message(client, chat_id, f"🛑 Active number <code>{act_id}</code> cancel ho raha hai...")
-                                await otpd_cancel(client, api_key, act_id)
-                                state["active_id"] = None
-                            await send_tg_message(client, chat_id, "🛑 <b>Hunting Stop kar di gayi hai.</b>")
+                            state["hunting"] = False
+                            # Cancel all active worker numbers across keys
+                            worker_states = state.get("worker_states", {})
+                            for w_idx, w_st in worker_states.items():
+                                act_id = w_st.get("active_id")
+                                w_key = w_st.get("api_key")
+                                if act_id and w_key:
+                                    print(f"[Stop] Worker #{w_idx} cancelling active number {act_id}...")
+                                    await otpd_cancel(client, w_key, act_id)
+                                    w_st["active_id"] = None
+                            await send_tg_message(client, chat_id, "🛑 <b>Sabhi Hunter Workers Stop kar diye gaye hain.</b>", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
                         else:
                             await send_tg_message(client, chat_id, "ℹ️ Koi active hunt nahi chal rahi hai.")
 
