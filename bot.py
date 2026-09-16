@@ -317,6 +317,16 @@ ACCOUNTS_HISTORY_FILE = "accounts_history.json"
 ACCOUNTS_SUMMARY_TXT = os.path.join("accounts", "created_accounts_summary.txt")
 
 
+# ─── Persistent Created Accounts Summary & History ────────────────────────────
+ACCOUNTS_LOCK = asyncio.Lock()
+ACCOUNTS_HISTORY_FILE = "accounts_history.json"
+ACCOUNTS_SUMMARY_TXT = os.path.join("accounts", "created_accounts_summary.txt")
+
+TRANSACTIONS_LOCK = asyncio.Lock()
+TRANSACTIONS_HISTORY_FILE = "transactions_history.json"
+TRANSACTIONS_LOG_TXT = os.path.join("accounts", "transactions_log.txt")
+
+
 def load_accounts_history() -> list:
     if os.path.exists(ACCOUNTS_HISTORY_FILE):
         try:
@@ -333,6 +343,75 @@ def save_accounts_history(history: list):
             json.dump(history, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"[Accounts History Save Error] {e}")
+
+
+def load_transactions_history() -> list:
+    if os.path.exists(TRANSACTIONS_HISTORY_FILE):
+        try:
+            with open(TRANSACTIONS_HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_transactions_history(history: list):
+    try:
+        with open(TRANSACTIONS_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Transactions History Save Error] {e}")
+
+
+def regenerate_transactions_log_txt():
+    try:
+        os.makedirs("accounts", exist_ok=True)
+        history = load_transactions_history()
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            "==========================================================================================================",
+            "                            MEESHO BOT - TRANSACTION & ACTIVITY AUDIT LOG",
+            "==========================================================================================================",
+            f"Log Generated At : {now_str}",
+            f"Total Transactions Logged: {len(history)}",
+            "----------------------------------------------------------------------------------------------------------",
+            f"{'#':<4} | {'Event / Action':<24} | {'Mobile Number':<14} | {'Worker':<12} | {'Server':<8} | {'Wallet Bal':<12} | {'Timestamp':<20}",
+            "----------------------------------------------------------------------------------------------------------",
+        ]
+        for item in history:
+            idx = item.get("id", 1)
+            event = item.get("event", "")
+            phone = item.get("phone", "N/A")
+            worker = f"Worker #{item.get('worker_id', 1)}" if item.get('worker_id') else "System"
+            server = str(item.get("server", "-"))
+            bal = str(item.get("balance", "-"))
+            dt = item.get("created_at", "")
+            lines.append(f"{idx:<4} | {event:<24} | +91{phone:<11} | {worker:<12} | {server:<8} | ₹{bal:<11} | {dt:<20}")
+        lines.append("==========================================================================================================")
+        with open(TRANSACTIONS_LOG_TXT, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception as e:
+        print(f"[Regenerate Transactions Log Error] {e}")
+
+
+async def record_transaction(event: str, phone: str, worker_id: int, server: str, balance: str, details: str = ""):
+    async with TRANSACTIONS_LOCK:
+        history = load_transactions_history()
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry = {
+            "id": len(history) + 1,
+            "event": event,
+            "phone": phone,
+            "worker_id": worker_id,
+            "server": str(server),
+            "balance": str(balance),
+            "details": details,
+            "created_at": now_str,
+            "timestamp": time.time(),
+        }
+        history.append(entry)
+        save_transactions_history(history)
+        regenerate_transactions_log_txt()
 
 
 def regenerate_accounts_summary_txt():
@@ -365,6 +444,54 @@ def regenerate_accounts_summary_txt():
         print(f"[Regenerate Summary Error] {e}")
 
 
+def regenerate_all_summary_reports() -> list[str]:
+    """Regenerates master summary, transaction log, and per-worker account files."""
+    generated_files = []
+    regenerate_accounts_summary_txt()
+    regenerate_transactions_log_txt()
+    if os.path.exists(ACCOUNTS_SUMMARY_TXT):
+        generated_files.append(ACCOUNTS_SUMMARY_TXT)
+    if os.path.exists(TRANSACTIONS_LOG_TXT):
+        generated_files.append(TRANSACTIONS_LOG_TXT)
+
+    try:
+        os.makedirs("accounts", exist_ok=True)
+        history = load_accounts_history()
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        worker_groups = {}
+        for item in history:
+            w_id = item.get("worker_id", 1)
+            worker_groups.setdefault(w_id, []).append(item)
+
+        for w_id, w_items in worker_groups.items():
+            w_file = os.path.join("accounts", f"worker_{w_id}_accounts_summary.txt")
+            lines = [
+                "================================================================================",
+                f"             MEESHO BOT - WORKER #{w_id} CREATED ACCOUNTS SUMMARY",
+                "================================================================================",
+                f"Report Generated At : {now_str}",
+                f"Worker Identification: Worker #{w_id}",
+                f"Total Accounts Created by this Worker: {len(w_items)}",
+                "--------------------------------------------------------------------------------",
+                f"{'#':<4} | {'Mobile Number':<14} | {'User ID':<18} | {'Server':<8} | {'Date & Time':<20}",
+                "--------------------------------------------------------------------------------",
+            ]
+            for i, it in enumerate(w_items, start=1):
+                phone = it.get("phone", "")
+                uid = it.get("user_id", "")
+                srv = it.get("server", "")
+                dt = it.get("created_at", "")
+                lines.append(f"{i:<4} | +91{phone:<11} | {str(uid):<18} | {str(srv):<8} | {dt:<20}")
+            lines.append("================================================================================")
+            with open(w_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            generated_files.append(w_file)
+    except Exception as e:
+        print(f"[Per-Worker Summary Error] {e}")
+
+    return generated_files
+
+
 async def record_created_account(phone: str, user_id: str, server: str, worker_id: int, key_preview: str, file_path: str):
     async with ACCOUNTS_LOCK:
         history = load_accounts_history()
@@ -382,11 +509,12 @@ async def record_created_account(phone: str, user_id: str, server: str, worker_i
         }
         history.append(entry)
         save_accounts_history(history)
-        regenerate_accounts_summary_txt()
+        regenerate_all_summary_reports()
 
 
 def generate_accounts_summary_text() -> str:
     history = load_accounts_history()
+    tx_history = load_transactions_history()
     total = len(history)
     today_prefix = time.strftime("%Y-%m-%d")
     today_count = sum(1 for x in history if x.get("created_at", "").startswith(today_prefix))
@@ -411,16 +539,27 @@ def generate_accounts_summary_text() -> str:
             )
     recent_text = "\n".join(recent_lines) if recent_lines else "<i>No accounts created yet.</i>"
 
+    # Recent transactions snippet
+    recent_tx = tx_history[-4:]
+    recent_tx_lines = []
+    if recent_tx:
+        for t in reversed(recent_tx):
+            recent_tx_lines.append(
+                f"• <code>{t.get('event')}</code> | +91{t.get('phone', 'N/A')} | W#{t.get('worker_id', 1)} | Bal: ₹{t.get('balance')} (<i>{t.get('created_at', '')[-8:]}</i>)"
+            )
+    recent_tx_text = "\n".join(recent_tx_lines) if recent_tx_lines else "<i>No transactions logged yet.</i>"
+
     summary_msg = (
-        f"📋 <b>MEESHO ACCOUNTS MASTER SUMMARY</b>\n"
+        f"📋 <b>MEESHO MASTER SUMMARY & AUDIT REPORT</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Total Accounts Created:</b> <b>{total}</b>\n"
         f"📅 <b>Created Today ({today_prefix}):</b> <b>{today_count}</b>\n\n"
         f"🏷️ <b>Server Breakdown:</b> {srv_breakdown}\n"
         f"⚡ <b>Worker Breakdown:</b> {worker_breakdown}\n\n"
-        f"🕒 <b>Latest Created Accounts:</b>\n{recent_text}\n"
+        f"🕒 <b>Latest Created Accounts:</b>\n{recent_text}\n\n"
+        f"💳 <b>Recent Wallet / Number Activity:</b>\n{recent_tx_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📁 <i>Niche detailed <code>created_accounts_summary.txt</code> report file attach ki gayi hai.</i>"
+        f"📁 <i>Niche detailed <b>Master Summary</b>, <b>Per-Worker Summary</b>, aur <b>Transaction Log</b> files attach ki gayi hain.</i>"
     )
     return summary_msg
 
@@ -765,6 +904,11 @@ async def schedule_delayed_cancel(
             success, res_info = await otpd_cancel_attempt(client, api_key, act_id)
             if success:
                 print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ✅ Number +91{phone} (ID: {act_id}) successfully cancelled & refunded! ({res_info})")
+                try:
+                    cur_bal = await otpd_balance(client, api_key)
+                    await record_transaction("REFUND_CONFIRMED", phone, 0, "-", cur_bal, res_info)
+                except Exception:
+                    pass
                 break
 
             print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ⚠️ Cancel rejected for +91{phone} (ID: {act_id}): {res_info}. Retrying in 60s (1 min)...")
@@ -1865,7 +2009,9 @@ async def run_single_key_worker(
         act_id = res["id"]
         phone = res["phone"]
         w_state["active_id"] = act_id
-        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Got number: {phone} (ID: {act_id}, Server: {current_server}) — checking registration...")
+        cur_bal = await otpd_balance(client, api_key)
+        await record_transaction("NUMBER_BOUGHT", phone, worker_id, current_server, cur_bal, f"Key: {key_preview}")
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Got number: {phone} (ID: {act_id}, Server: {current_server}, Bal: ₹{cur_bal}) — checking registration...")
 
         chk = await check_meesho_reg(client, phone)
         if not chk.get("ok"):
@@ -1875,6 +2021,8 @@ async def run_single_key_worker(
         if not chk.get("ok"):
             err_detail = chk.get("error", "Both checker endpoints down")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🚨 Checker failed: {err_detail}. Queued cancel for {phone}...")
+            cur_bal = await otpd_balance(client, api_key)
+            await record_transaction("CHECKER_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_detail)
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
@@ -1886,6 +2034,8 @@ async def run_single_key_worker(
         if is_reg is True:
             w_state["registered"] += 1
             state["registered_count"] += 1
+            cur_bal = await otpd_balance(client, api_key)
+            await record_transaction("NUMBER_CANCEL_QUEUED", phone, worker_id, current_server, cur_bal, "Registered/Old User")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Number {phone} is REGISTERED. Queued 3-min cancel with 1-min retry...")
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
             w_state["active_id"] = None
@@ -1895,25 +2045,37 @@ async def run_single_key_worker(
         # ── FRESH / UNREGISTERED NUMBER FOUND! ──
         print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🎉 FRESH NUMBER FOUND: {phone} (Server: {current_server}) — Starting OTP login...")
 
+        fresh_alert_msg = (
+            f"🎉 <b>FRESH UNREGISTERED NUMBER FOUND!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
+            f"⚡ <b>Worker:</b> <code>Worker #{worker_id}</code> (Key: <code>{key_preview}</code>)\n"
+            f"🏷️ <b>Server:</b> <code>Server {current_server}</code>\n"
+            f"📩 <b>Action:</b> Meesho Official OTP bheja jaa raha hai (Max wait: 2 mins)..."
+        )
+        await send_tg_message(client, chat_id, fresh_alert_msg)
+
         dev = mk_device()
         otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id)
         if not otp_res.get("ok"):
             err_str = otp_res.get("error", "Failed")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ OTP send failed: {err_str}. Queued cancel for refund...")
+            cur_bal = await otpd_balance(client, api_key)
+            await record_transaction("OTP_SEND_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_str)
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
 
         session_dict = otp_res["session"]
-        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ OTP sent to {phone}! Waiting for SMS...")
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ OTP sent to {phone}! Waiting for SMS (max 2 mins)...")
 
-        # Poll OTP Doctor for incoming SMS
+        # Poll OTP Doctor for incoming SMS (Max 2 minutes = 120 seconds)
         otp_code = None
         sms_text = ""
         start_wait = time.time()
 
-        while (time.time() - start_wait) < 180:
+        while (time.time() - start_wait) < 120:
             if state.get("stop_flag") or not state.get("hunting"):
                 await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
                 w_state["active_id"] = None
@@ -1930,7 +2092,9 @@ async def run_single_key_worker(
             await asyncio.sleep(2)
 
         if not otp_code:
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone}. Sending cancel request...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone} (2 mins elapsed). Sending cancel request...")
+            cur_bal = await otpd_balance(client, api_key)
+            await record_transaction("SMS_TIMEOUT_CANCEL", phone, worker_id, current_server, cur_bal, "2-min Timeout")
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
@@ -1958,7 +2122,9 @@ async def run_single_key_worker(
             with open(fname, "w", encoding="utf-8") as f:
                 f.write(json_str)
 
-            # Record in Master Account Summary File & DB
+            # Record in Master Account Summary File, Audit Log & DB
+            cur_bal = await otpd_balance(client, api_key)
+            await record_transaction("ACCOUNT_CREATED", phone, worker_id, current_server, cur_bal, f"UID: {user_id}")
             await record_created_account(phone, user_id, current_server, worker_id, key_preview, fname)
 
             # Sync to TelegramBotSell Store Stock
@@ -1989,6 +2155,8 @@ async def run_single_key_worker(
         else:
             err_msg = login_res.get("error", "Login failed")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Meesho login failed: {err_msg}. Queued cancel...")
+            cur_bal = await otpd_balance(client, api_key)
+            await record_transaction("LOGIN_FAILED_CANCEL", phone, worker_id, current_server, cur_bal, err_msg)
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
 
@@ -3424,23 +3592,33 @@ async def bot_loop():
 
                     # ── 📋 Accounts Summary & History Report (/summary, /accounts) ──
                     elif text in ("📋 Accounts Summary", "/summary", "/accounts", "/report"):
-                        regenerate_accounts_summary_txt()
+                        generated_files = regenerate_all_summary_reports()
                         sum_text = generate_accounts_summary_text()
                         await send_tg_message(client, chat_id, sum_text, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
 
-                        if os.path.exists(ACCOUNTS_SUMMARY_TXT) and os.path.getsize(ACCOUNTS_SUMMARY_TXT) > 0:
-                            try:
-                                with open(ACCOUNTS_SUMMARY_TXT, "r", encoding="utf-8") as f:
-                                    txt_content = f.read()
-                                await send_tg_document(
-                                    client,
-                                    chat_id,
-                                    filename="created_accounts_summary.txt",
-                                    content=txt_content,
-                                    caption="📋 <b>Meesho Created Accounts Official Summary Report</b>",
-                                )
-                            except Exception as e:
-                                print(f"[Send Summary File Error] {e}")
+                        for fpath in generated_files:
+                            if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+                                try:
+                                    fname = os.path.basename(fpath)
+                                    with open(fpath, "r", encoding="utf-8") as f:
+                                        txt_content = f.read()
+                                    if "worker_" in fname:
+                                        w_num = fname.split("_")[1]
+                                        cap = f"⚡ <b>Worker #{w_num} Created Accounts Report</b>"
+                                    elif "transactions" in fname:
+                                        cap = "💳 <b>Wallet & Transactions Audit Log</b>"
+                                    else:
+                                        cap = "📋 <b>Meesho Master Accounts Summary Report</b>"
+                                    await send_tg_document(
+                                        client,
+                                        chat_id,
+                                        filename=fname,
+                                        content=txt_content,
+                                        caption=cap,
+                                    )
+                                    await asyncio.sleep(0.3)
+                                except Exception as e:
+                                    print(f"[Send Summary File Error] {fpath}: {e}")
 
                     # ── 📝 Set JSON Format Template ──
                     elif text.startswith("/setjson") or text == "📝 Set JSON Format":
