@@ -825,13 +825,41 @@ async def answer_tg_callback(client: httpx.AsyncClient, callback_query_id: str, 
 
 
 # ─── OTP Doctor API Helpers ───────────────────────────────────────────────────
-async def otpd_balance(client: httpx.AsyncClient, api_key: str) -> str:
-    try:
-        r = await client.get(OTP_DOCTOR_BASE, params={"action": "getBalance", "api_key": api_key}, timeout=10)
-        t = r.text.strip()
-        return t.split(":")[1] if t.startswith("ACCESS_BALANCE:") else t
-    except Exception as e:
-        return f"Error ({e})"
+BALANCE_CACHE = {}  # {api_key: {"balance": str, "time": float}}
+
+
+async def otpd_balance(client: httpx.AsyncClient, api_key: str, force_refresh: bool = False) -> str:
+    now = time.time()
+    cached = BALANCE_CACHE.get(api_key)
+    # Return cached balance if fetched within last 8 seconds to avoid OTP Doctor IP rate limits
+    if not force_refresh and cached and (now - cached.get("time", 0)) < 8.0:
+        return cached["balance"]
+
+    for attempt in range(2):
+        try:
+            r = await client.get(OTP_DOCTOR_BASE, params={"action": "getBalance", "api_key": api_key}, timeout=10)
+            t = r.text.strip()
+            if t.startswith("ACCESS_BALANCE:"):
+                val = t.split(":")[1]
+                BALANCE_CACHE[api_key] = {"balance": val, "time": time.time()}
+                return val
+            elif "RATE_LIMIT" in t or "TOO_MANY_REQUESTS" in t:
+                if cached and cached.get("balance"):
+                    return cached["balance"]
+                await asyncio.sleep(0.8)
+                continue
+            elif t.replace(".", "", 1).isdigit():
+                BALANCE_CACHE[api_key] = {"balance": t, "time": time.time()}
+                return t
+            return t
+        except Exception as e:
+            if cached and cached.get("balance"):
+                return cached["balance"]
+            return f"Error ({e})"
+
+    if cached and cached.get("balance"):
+        return cached["balance"]
+    return "0.00"
 
 
 async def otpd_buy(client: httpx.AsyncClient, api_key: str, svc_id: str) -> dict:
@@ -1914,6 +1942,8 @@ async def build_keys_view_message_and_markup(client: httpx.AsyncClient, chat_id:
             bal = await otpd_balance(client, k)
             masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
             lines.append(f"• <b>Key #{idx}:</b> <code>{masked}</code> | Balance: <b>₹{bal}</b> (<code>Worker #{idx}</code>)")
+            if idx < len(keys):
+                await asyncio.sleep(0.3)
 
     lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("👇 <i>Niche button dabakar actions choose karein:</i>")
