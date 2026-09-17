@@ -51,7 +51,7 @@ if hasattr(sys.stdout, "reconfigure"):
 # ─── Load Environment ─────────────────────────────────────────────────────────
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8519590900:AAG8kn_xe0obnB1cvEId-CzTjR7GFSMYrtU")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8519590900:AAHbABvAjuIGHI8GD7hlFk8eeL6ZVF2kab8")
 DEFAULT_OTP_DOCTOR_KEY = os.getenv("OTPDOCTOR_API_KEY", "").strip()
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "8282846997").strip()
 PORT = int(os.getenv("PORT", "10000"))
@@ -1775,6 +1775,33 @@ def sync_to_sell_store(account_data: dict, phone: str) -> dict:
 
 
 # ─── Keyboards ────────────────────────────────────────────────────────────────
+KNOWN_MENU_BUTTONS = {
+    "🚀 Start Hunt",
+    "📱 Check My Number",
+    "⚙️ Select Servers",
+    "🔑 Manage Keys",
+    "🔑 Set API Key",
+    "📋 Accounts Summary",
+    "📊 Stats",
+    "📝 Set JSON Format",
+    "🔄 Convert JSON",
+    "⚙️ Store Settings",
+    "📦 View Orders",
+    "💰 Balance",
+    "🛑 Stop Hunt",
+    "👤 Switch Identity",
+    "👤 API Session",
+    "🔗 Set Referral",
+    "💰 Set JSON Price",
+    "➕ Add Custom Server",
+    "🛍️ Buy Meesho JSON",
+    "📦 My Orders",
+    "💬 Contact Admin",
+    "ℹ️ How It Works",
+    "❌ Cancel",
+    "🔙 Back to Menu",
+}
+
 ADMIN_MAIN_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": "🚀 Start Hunt"}, {"text": "📱 Check My Number"}],
@@ -3169,6 +3196,13 @@ async def bot_loop():
                         menu_kb = ADMIN_MAIN_MENU_KEYBOARD if admin_flag else USER_MAIN_MENU_KEYBOARD
                         await send_tg_message(client, chat_id, "✅ Main menu par aa gaye.", reply_markup=menu_kb)
                         continue
+
+                    # Auto-clear stuck manual_step if any standard menu button or command is clicked
+                    if text in KNOWN_MENU_BUTTONS or (text.startswith("/") and not (state.get("manual_step") == "confirm_otp" and text in ("/yes", "/no"))):
+                        state["manual_step"] = None
+                        state["awaiting_utr_order"] = None
+                        state["awaiting_custom_delivery_order"] = None
+                        state["awaiting_admin_reply_user"] = None
 
                     # ══════════════════════════════════════════════════════════
                     # 👑 ADMIN CUSTOM DELIVERY & DIRECT MESSAGING HANDLERS
