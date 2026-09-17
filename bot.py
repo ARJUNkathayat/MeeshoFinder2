@@ -2137,12 +2137,8 @@ async def run_single_key_worker(
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Server {current_server} Buy error: {err}")
 
             if "NO_BALANCE" in err:
-                w_state["status"] = "No Balance (Waiting)"
-                await send_tg_message(
-                    client,
-                    chat_id,
-                    f"⚠️ <b>Worker #{worker_id} Low Balance!</b> (Key: <code>{key_preview}</code> | Server: {current_server})\nCancel refund aane ka wait kar rahe hain...",
-                )
+                w_state["status"] = "Waiting Refund"
+                print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ Low balance (Server {current_server}, Key {key_preview}). Waiting for background cancel refund...")
                 refund_done = False
                 for _ in range(5):
                     if state.get("stop_flag") or not state.get("hunting"):
@@ -2150,23 +2146,19 @@ async def run_single_key_worker(
                     await asyncio.sleep(60)
                     new_bal = await otpd_balance(client, api_key)
                     try:
-                        if float(new_bal) >= 10.0:
-                            await send_tg_message(
-                                client,
-                                chat_id,
-                                f"✅ <b>Worker #{worker_id} Refund aa gaya!</b> Key: <code>{key_preview}</code> Naya Balance: ₹{new_bal}\nHunting continue...",
-                            )
+                        if float(new_bal) >= 9.0:
+                            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ✅ Refund received! New Balance: ₹{new_bal}. Resuming hunt silently...")
                             w_state["status"] = "Running"
                             refund_done = True
                             break
                     except ValueError:
                         pass
                 if not refund_done:
-                    w_state["status"] = "Paused (Insufficient Balance)"
+                    w_state["status"] = "Paused (No Balance)"
                     await send_tg_message(
                         client,
                         chat_id,
-                        f"❌ <b>Worker #{worker_id} Paused!</b> Key <code>{key_preview}</code> balance insufficient. Baaki workers chalte rahenge.",
+                        f"❌ <b>Worker #{worker_id} Paused!</b> Key <code>{key_preview}</code> balance insufficient (>5 min wait). Baaki workers chalte rahenge.",
                     )
                     break
                 continue
@@ -2274,7 +2266,7 @@ async def run_single_key_worker(
 
         # Verify OTP & Login to Meesho
         print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🔐 Verifying OTP {otp_code} for {phone}...")
-        login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev)
+        login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev, chat_id=chat_id)
 
         if login_res.get("ok"):
             w_state["accounts"] += 1
@@ -2299,19 +2291,37 @@ async def run_single_key_worker(
             await record_transaction("ACCOUNT_CREATED", phone, worker_id, current_server, cur_bal, f"UID: {user_id}")
             await record_created_account(phone, user_id, current_server, worker_id, key_preview, fname)
 
+            # Calculate today's index & stats
+            history = load_accounts_history()
+            today_prefix = time.strftime("%Y-%m-%d")
+            today_count = sum(1 for x in history if x.get("created_at", "").startswith(today_prefix))
+
+            def ordinal(n):
+                if 11 <= (n % 100) <= 13:
+                    return f"{n}th"
+                return f"{n}" + {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+            today_ordinal = ordinal(today_count)
+            lifetime_total = len(history)
+
             # Sync to TelegramBotSell Store Stock
             sync_res = sync_to_sell_store(account_data, phone)
             store_tag = f"\n🛒 <b>Auto-Stocked in Sell Bot:</b> ✅ Live (Total Stock: {sync_res.get('stock', 1)})" if sync_res.get("ok") else ""
 
             account_msg = (
-                f"🎉 <b>MEESHO ACCOUNT SUCCESSFULLY CREATED!</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⚡ <b>Worker:</b> <code>Worker #{worker_id} (Key: {key_preview})</code>\n"
-                f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
-                f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
-                f"🏷️ <b>Server:</b> <code>{current_server}</code>{store_tag}\n\n"
-                f"📋 <b>Account JSON:</b>\n"
-                f"<pre><code>{json_str}</code></pre>"
+                f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
+                f"🎉 <b>MEESHO ACCOUNT CREATED SUCCESSFULLY!</b>\n"
+                f"🏆 <b>Aaj Ka {today_ordinal} Fresh JSON!</b> (Date: <code>{today_prefix}</code>)\n"
+                f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n\n"
+                f"📱 <b>Mobile Number:</b> <code>+91 {phone}</code>\n"
+                f"👤 <b>Meesho User ID:</b> <code>{user_id}</code>\n"
+                f"⚡ <b>Mined By:</b> <code>Worker #{worker_id}</code> (Key: <code>{key_preview}</code>)\n"
+                f"🏷️ <b>Server:</b> <code>Server {current_server}</code>\n"
+                f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime Total: <b>#{lifetime_total}</b>{store_tag}\n\n"
+                f"📋 <b>Account JSON Data:</b>\n"
+                f"<pre><code>{json_str}</code></pre>\n"
+                f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
+                f"📁 <i>Niche official <code>meesho_{phone}.json</code> file attach ki gayi hai.</i>"
             )
             await send_tg_message(client, chat_id, account_msg)
 
@@ -2320,7 +2330,7 @@ async def run_single_key_worker(
                 chat_id,
                 filename=f"meesho_{phone}.json",
                 content=json_str,
-                caption=f"✅ Meesho Account: +91{phone} (Worker #{worker_id} | Server {current_server})",
+                caption=f"✅ Meesho Account (+91{phone}) — Aaj Ka #{today_count} JSON | Worker #{worker_id}",
             )
 
             w_state["active_id"] = None
@@ -2580,13 +2590,32 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
         sync_res = sync_to_sell_store(account_data, phone)
         store_tag = f"\n🛒 <b>Auto-Stocked in Sell Bot:</b> ✅ Live (Total Stock: {sync_res.get('stock', 1)})" if sync_res.get("ok") else ""
 
+        # Calculate today's index & stats
+        history = load_accounts_history()
+        today_prefix = time.strftime("%Y-%m-%d")
+        today_count = sum(1 for x in history if x.get("created_at", "").startswith(today_prefix))
+
+        def ordinal(n):
+            if 11 <= (n % 100) <= 13:
+                return f"{n}th"
+            return f"{n}" + {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+        today_ordinal = ordinal(today_count)
+        lifetime_total = len(history)
+
         account_msg = (
-            f"🎉 <b>MEESHO ACCOUNT SUCCESSFULLY CREATED!</b>\n\n"
-            f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
-            f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
-            f"🏷️ <b>Type:</b> {'Old User' if is_reg else 'Fresh User'}{store_tag}\n\n"
-            f"📋 <b>Account JSON:</b>\n"
-            f"<pre><code>{json_str}</code></pre>"
+            f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
+            f"🎉 <b>MEESHO ACCOUNT CREATED SUCCESSFULLY!</b>\n"
+            f"🏆 <b>Aaj Ka {today_ordinal} Fresh JSON!</b> (Date: <code>{today_prefix}</code>)\n"
+            f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n\n"
+            f"📱 <b>Mobile Number:</b> <code>+91 {phone}</code>\n"
+            f"👤 <b>Meesho User ID:</b> <code>{user_id}</code>\n"
+            f"🏷️ <b>Account Type:</b> {'Old User (Existing)' if is_reg else 'Fresh Unregistered'}{store_tag}\n"
+            f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime Total: <b>#{lifetime_total}</b>\n\n"
+            f"📋 <b>Account JSON Data:</b>\n"
+            f"<pre><code>{json_str}</code></pre>\n"
+            f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
+            f"📁 <i>Niche official <code>meesho_{phone}.json</code> file attach ki gayi hai.</i>"
         )
         await send_tg_message(client, chat_id, account_msg, reply_markup=MAIN_MENU_KEYBOARD)
 
@@ -2595,7 +2624,7 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
             chat_id,
             filename=f"meesho_{phone}.json",
             content=json_str,
-            caption=f"✅ Meesho Account: +91{phone}",
+            caption=f"✅ Meesho Account (+91{phone}) — Aaj Ka #{today_count} JSON",
         )
     else:
         err_msg = login_res.get("error", "Login failed")
