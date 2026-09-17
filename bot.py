@@ -2691,16 +2691,17 @@ async def convert_and_send_json(client: httpx.AsyncClient, chat_id: int | str, c
 
 # ─── Telegram Bot Polling Loop (Dual-Mode: User Store & Admin Hunter) ─────────
 async def bot_loop():
-    print("🤖 Multi-Server Meesho Bot Started! (@BotFather verified)")
-    async with httpx.AsyncClient() as client:
+    print(f"[{time.strftime('%H:%M:%S')}] 🤖 Multi-Server Meesho Bot Started! (@BotFather verified)", flush=True)
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            await client.post(
+            del_res = await client.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-                json={"drop_pending_updates": True},
+                json={"drop_pending_updates": False},
                 timeout=10,
             )
-        except Exception:
-            pass
+            print(f"[{time.strftime('%H:%M:%S')}] [Telegram Webhook] Deleted: {del_res.json()}", flush=True)
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] [Telegram Webhook Warning] {e}", flush=True)
 
         offset = 0
 
@@ -2710,19 +2711,19 @@ async def bot_loop():
                     f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
                     json={
                         "offset": offset,
-                        "timeout": 25,
+                        "timeout": 10,
                         "allowed_updates": ["message", "callback_query"],
                     },
-                    timeout=35.0,
+                    timeout=20.0,
                 )
                 if r.status_code != 200:
-                    print(f"[{time.strftime('%H:%M:%S')}] [TG Polling Warning] HTTP {r.status_code}: {r.text[:200]}")
+                    print(f"[{time.strftime('%H:%M:%S')}] [TG Polling Warning] HTTP {r.status_code}: {r.text[:200]}", flush=True)
                     await asyncio.sleep(2)
                     continue
 
                 data = r.json()
                 if not data.get("ok"):
-                    print(f"[{time.strftime('%H:%M:%S')}] [TG getUpdates Error] {data.get('description')}")
+                    print(f"[{time.strftime('%H:%M:%S')}] [TG getUpdates Error] {data.get('description')}", flush=True)
                     await asyncio.sleep(3)
                     continue
 
@@ -2742,6 +2743,7 @@ async def bot_loop():
                         cb_data = cb.get("data", "")
                         cb_msg = cb.get("message")
                         cb_chat_id = cb_msg["chat"]["id"] if cb_msg else cb_user_id
+                        print(f"[{time.strftime('%H:%M:%S')}] [TG Callback] user={cb_user_id} data={cb_data}", flush=True)
 
                         # ── Admin Approve Order Callback ──
                         if cb_data.startswith("approve_ord_"):
@@ -3147,6 +3149,7 @@ async def bot_loop():
                     first_name = from_user.get("first_name", "User")
                     username = from_user.get("username", "")
                     text = (msg.get("text") or "").strip()
+                    print(f"[{time.strftime('%H:%M:%S')}] [TG Message] chat_id={chat_id} ({first_name} @{username}) text={repr(text)}", flush=True)
 
                     state = ACTIVE_TASKS.setdefault(chat_id, {"hunting": False, "active_id": None, "stop_flag": False})
                     cfg = get_user_config(chat_id)
@@ -4320,11 +4323,16 @@ async def bot_loop():
                             await send_tg_message(client, chat_id, "ℹ️ Koi active hunt nahi chal rahi hai.")
 
             except Exception as e:
-                print(f"[Polling Exception] {e}")
+                print(f"[{time.strftime('%H:%M:%S')}] [Polling Exception] {type(e).__name__}: {e}", flush=True)
                 await asyncio.sleep(2)
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except Exception:
+            pass
     t = threading.Thread(target=start_health_server, daemon=True)
     t.start()
     asyncio.run(bot_loop())
