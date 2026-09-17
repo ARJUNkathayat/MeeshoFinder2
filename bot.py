@@ -61,27 +61,86 @@ OTP_DOCTOR_WEB_TOKEN = "6874841e41592b17f19761540921b8b4d200920078bff7d9cc8d843d
 
 # ─── Crowstack Signup APIs (Primary OTP Send & Verify) ────────────────────────
 CROWSTACK_BASE = "https://meesho.crowstack.tech/api/signup"
-CROWSTACK_HEADERS = {
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
-    "Content-Type": "application/json",
-    "Origin": "https://meesho.crowstack.tech",
-    "Referer": "https://meesho.crowstack.tech/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
-    "X-Tg-Init-Data": (
-        "query_id=AAEVN7JtAwAAABU3sm2aUBhR&user=%7B%22id%22%3A8282846997%2C"
-        "%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C"
-        "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
-        "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
-        "%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D"
-        "&auth_date=1788610401&signature=k4mneTgLJIWH33XG-nBIs8kE-cNIsE70RKNacz3NZc80zbLpoq0BRRoTuEDZNCMX6Dy1p48Kxu6Jw_CajHMRAw"
-        "&hash=54fb10c6a40b2b5fd9002abcc44d5871328080319f4f168796a053e7599ffcf5"
-    ),
-    "sec-ch-ua": '"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
+CROWSTACK_ACCOUNT_BASE = "https://meesho.crowstack.tech/api/account"
+
+CROWSTACK_PROFILES = {
+    "new": {
+        "id": "new",
+        "name": "New Session (Rem #8912242607 - Edge)",
+        "user_id": "8912242607",
+        "user_name": "Rem",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0",
+        "sec_ch_ua": '"Microsoft Edge";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+        "sec_ch_ua_mobile": "?0",
+        "sec_ch_ua_platform": '"Windows"',
+        "x_tg_init_data": (
+            "query_id=AAGvBzYTBAAAAK8HNhP7Dhtm&user=%7B%22id%22%3A8912242607%2C"
+            "%22first_name%22%3A%22Rem%22%2C%22last_name%22%3A%22%22%2C"
+            "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
+            "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
+            "%2FCzB6ff0QnWjL-1jduLteUDGtPQ_2cw5UV_KgdSt69fDwah01TLx2_AIcKiFqxJey.svg%22%7D"
+            "&auth_date=1789637334&signature=0f4IiovJUmSCMjQO_cieFIvNaZwEgdrDuKycxBvmGFIZ5earGhSLWEq5yBN3fv_8JWofx-m3-PijQdsZ3-p-Bg"
+            "&hash=a62c0ca85e8c3745a9f0f1812930baf75af7f263fb114404e7976f8f4d0d9305"
+        ),
+    },
+    "main": {
+        "id": "main",
+        "name": "Main Session (Marin #8282846997 - Chrome)",
+        "user_id": "8282846997",
+        "user_name": "Marin",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"',
+        "sec_ch_ua_mobile": "?0",
+        "sec_ch_ua_platform": '"Windows"',
+        "x_tg_init_data": (
+            "query_id=AAEVN7JtAwAAABU3sm2aUBhR&user=%7B%22id%22%3A8282846997%2C"
+            "%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C"
+            "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
+            "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
+            "%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D"
+            "&auth_date=1788610401&signature=k4mneTgLJIWH33XG-nBIs8kE-cNIsE70RKNacz3NZc80zbLpoq0BRRoTuEDZNCMX6Dy1p48Kxu6Jw_CajHMRAw"
+            "&hash=54fb10c6a40b2b5fd9002abcc44d5871328080319f4f168796a053e7599ffcf5"
+        ),
+    },
 }
+
+
+def get_crowstack_profile_key(chat_id: int | str = None) -> str:
+    if chat_id:
+        cfg = get_user_config(chat_id)
+        return cfg.get("crowstack_profile", "new")
+    return "new"
+
+
+def get_crowstack_headers(chat_id: int | str = None) -> dict:
+    prof_key = get_crowstack_profile_key(chat_id)
+    cfg = get_user_config(chat_id) if chat_id else {}
+    prof = CROWSTACK_PROFILES.get(prof_key, CROWSTACK_PROFILES["new"])
+    init_data = cfg.get("crowstack_custom_init_data") if (prof_key == "custom" and cfg.get("crowstack_custom_init_data")) else prof["x_tg_init_data"]
+
+    return {
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Content-Type": "application/json",
+        "Origin": "https://meesho.crowstack.tech",
+        "Pragma": "no-cache",
+        "Referer": "https://meesho.crowstack.tech/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Storage-Access": "active",
+        "User-Agent": prof["user_agent"],
+        "X-Tg-Init-Data": init_data,
+        "sec-ch-ua": prof["sec_ch_ua"],
+        "sec-ch-ua-mobile": prof["sec_ch_ua_mobile"],
+        "sec-ch-ua-platform": prof["sec_ch_ua_platform"],
+    }
+
+
+# Backwards compatibility alias
+CROWSTACK_HEADERS = get_crowstack_headers()
 
 # User Referral Program Link
 REFERRAL_LINK = "https://app.meesho.com/2yoV/r99th0qd?via=9qx7y4&from=referral_program"
@@ -1151,15 +1210,37 @@ async def verify_meesho_otpless_fallback(client: httpx.AsyncClient, phone: str, 
         return {"ok": False, "error": str(e)}
 
 
+async def crowstack_export_file(client: httpx.AsyncClient, chat_id: int | str = None) -> dict:
+    """Calls Crowstack export_file API to fetch full account and session export."""
+    try:
+        headers = get_crowstack_headers(chat_id)
+        resp = await client.post(
+            f"{CROWSTACK_ACCOUNT_BASE}/export_file",
+            headers=headers,
+            json={},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            try:
+                data = resp.json() or {}
+                return {"ok": True, "data": data}
+            except Exception:
+                return {"ok": True, "text": resp.text}
+        return {"ok": False, "status": resp.status_code, "text": resp.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None) -> dict:
     """Dispatches OTP using Crowstack API (primary) -> Hidenfree API -> GemixAI API (with ₹200 reroll) -> direct OTPLESS."""
-    # 1. Primary: Crowstack API (with dynamic user referral link)
+    # 1. Primary: Crowstack API (with dynamic user referral link and selected session profile)
     try:
         cur_ref = get_referral_link()
         payload = {"phone": phone, "ref_link": cur_ref, "force": True}
+        headers = get_crowstack_headers(chat_id)
         resp = await client.post(
             f"{CROWSTACK_BASE}/send-otp",
-            headers=CROWSTACK_HEADERS,
+            headers=headers,
             json=payload,
             timeout=15,
         )
@@ -1175,6 +1256,7 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
                         "method": "crowstack",
                         "phone": phone,
                         "instance_id": dev["instance_id"],
+                        "chat_id": chat_id,
                     },
                 }
             else:
@@ -1206,6 +1288,7 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
                         "method": "hidenfree",
                         "phone": phone,
                         "instance_id": dev["instance_id"],
+                        "chat_id": chat_id,
                     },
                 }
             else:
@@ -1263,6 +1346,7 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
                         "phone": phone,
                         "bucket": offer_bucket,
                         "instance_id": dev["instance_id"],
+                        "chat_id": chat_id,
                     },
                 }
             else:
@@ -1274,26 +1358,45 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
     return await send_meesho_otpless_fallback(client, phone, dev)
 
 
-async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict) -> dict:
+async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict, chat_id: int | str = None) -> dict:
     """Verifies OTP via Crowstack, Hidenfree, GemixAI, or fallback to OTPLESS."""
+    cid = chat_id or session.get("chat_id")
     # Method 1: Crowstack
     if session.get("method") == "crowstack":
         try:
             payload = {"otp": otp}
+            headers = get_crowstack_headers(cid)
             resp = await client.post(
                 f"{CROWSTACK_BASE}/verify",
-                headers=CROWSTACK_HEADERS,
+                headers=headers,
                 json=payload,
                 timeout=15,
             )
             data = resp.json() if resp.status_code == 200 else {}
             if data.get("ok"):
                 acc = data.get("account", {})
+
+                # Call Crowstack Export File API right after account creation
+                try:
+                    exp_res = await crowstack_export_file(client, cid)
+                    if exp_res.get("ok"):
+                        exp_data = exp_res.get("data")
+                        if isinstance(exp_data, dict):
+                            for k, v in exp_data.items():
+                                if k not in acc or not acc[k]:
+                                    acc[k] = v
+                except Exception as exp_e:
+                    print(f"[Crowstack export_file error]: {exp_e}")
+
+                xo = acc.get("xo", "")
+                ox = acc.get("ox", "")
                 return {
                     "ok": True,
                     "user_id": acc.get("user_id"),
                     "phone": acc.get("mobile", phone),
                     "account": acc,
+                    "xo": xo,
+                    "ox": ox,
                     "bucket": acc.get("offer_bucket") or acc.get("bucket"),
                     "is_new": True,
                 }
@@ -1961,6 +2064,45 @@ async def build_keys_view_message_and_markup(client: httpx.AsyncClient, chat_id:
         ]
     }
     return "\n".join(lines), inline_kb
+
+
+def build_identity_settings_message_and_markup(chat_id: int | str):
+    cfg = get_user_config(chat_id)
+    cur_prof = cfg.get("crowstack_profile", "new")
+    prof_info = CROWSTACK_PROFILES.get(cur_prof, CROWSTACK_PROFILES["new"])
+
+    lines = [
+        "👤 <b>CROWSTACK API IDENTITY & SESSION MANAGER</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"⚡ <b>Active Session:</b> <code>{prof_info['name']}</code>",
+        f"🆔 <b>Account ID:</b> <code>{prof_info.get('user_id', 'N/A')} ({prof_info.get('user_name', 'N/A')})</code>",
+        f"🌐 <b>Client UA:</b> <code>{prof_info.get('user_agent', '').split(' ')[-1]}</code>\n",
+        "💡 <i>Jab aap session profile switch karte hain, sabhi Crowstack requests (send-otp, verify, export_file) usi identity aur header token se execute hoti hain.</i>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "👇 <b>Choose Active Crowstack Session Profile:</b>",
+    ]
+
+    btn_new = "✅ " if cur_prof == "new" else ""
+    btn_main = "✅ " if cur_prof == "main" else ""
+    btn_cust = "✅ " if cur_prof == "custom" else ""
+
+    kb = {
+        "inline_keyboard": [
+            [
+                {"text": f"{btn_new}✨ New Rem Session (#8912242607 - Edge)", "callback_data": "set_profile_new"},
+            ],
+            [
+                {"text": f"{btn_main}🔷 Main Marin Session (#8282846997 - Chrome)", "callback_data": "set_profile_main"},
+            ],
+            [
+                {"text": f"{btn_cust}✏️ Set Custom X-Tg-Init-Data", "callback_data": "set_profile_custom"},
+            ],
+            [
+                {"text": "🔙 Back to Store Settings", "callback_data": "open_settings_menu"},
+            ]
+        ]
+    }
+    return "\n".join(lines), kb
 
 
 # ─── Multi-Key Concurrent Worker Engine ───────────────────────────────────────
@@ -2855,6 +2997,101 @@ async def bot_loop():
                             await send_tg_message(client, cb_chat_id, keys_text, reply_markup=keys_kb)
                             continue
 
+                        # ── Crowstack Identity & Session Profile Callbacks ──
+                        elif cb_data == "open_identity_menu":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id)
+                            id_text, id_kb = build_identity_settings_message_and_markup(cb_chat_id)
+                            await send_tg_message(client, cb_chat_id, id_text, reply_markup=id_kb)
+                            continue
+
+                        elif cb_data == "open_settings_menu":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id)
+                            cur_ref = get_referral_link()
+                            cur_p = get_store_price()
+                            cur_upi = get_store_upi_id()
+                            cur_name = get_store_upi_name()
+                            prof_key = get_crowstack_profile_key(cb_chat_id)
+                            prof_name = CROWSTACK_PROFILES.get(prof_key, CROWSTACK_PROFILES["new"])["name"]
+                            settings_text = (
+                                f"⚙️ <b>MEESHO STORE & BOT SETTINGS</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"👤 <b>Active Crowstack Session:</b> <code>{prof_name}</code>\n"
+                                f"💰 <b>Meesho JSON Price:</b> <b>₹{cur_p}</b>\n"
+                                f"📲 <b>UPI ID:</b> <code>{cur_upi}</code>\n"
+                                f"👤 <b>Payee Name:</b> <b>{cur_name}</b>\n"
+                                f"🔗 <b>Referral Link:</b>\n<code>{cur_ref}</code>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"👇 <i>Niche button dabakar koi bhi setting turant update karein:</i>"
+                            )
+                            settings_kb = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "👤 Crowstack Session / Identity", "callback_data": "open_identity_menu"},
+                                    ],
+                                    [
+                                        {"text": "🔗 Change Referral Link", "callback_data": "set_ref_link"},
+                                    ],
+                                    [
+                                        {"text": "💳 Change UPI ID / Name", "callback_data": "set_upi_id"},
+                                        {"text": "💰 Change Price", "callback_data": "set_price"},
+                                    ]
+                                ]
+                            }
+                            await send_tg_message(client, cb_chat_id, settings_text, reply_markup=settings_kb)
+                            continue
+
+                        elif cb_data == "set_profile_new":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            update_user_config(cb_chat_id, {"crowstack_profile": "new"})
+                            await answer_tg_callback(client, cb_id, "✅ Switched to New Rem Session!")
+                            id_text, id_kb = build_identity_settings_message_and_markup(cb_chat_id)
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"🎉 <b>Crowstack Session Successfully Switched!</b>\n\nAb se sabhi OTP requests aur <code>export_file</code> calls <b>Rem (#8912242607)</b> profile aur Edge headers ke sath execute hongi.\n\n{id_text}",
+                                reply_markup=id_kb,
+                            )
+                            continue
+
+                        elif cb_data == "set_profile_main":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            update_user_config(cb_chat_id, {"crowstack_profile": "main"})
+                            await answer_tg_callback(client, cb_id, "✅ Switched to Main Marin Session!")
+                            id_text, id_kb = build_identity_settings_message_and_markup(cb_chat_id)
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"🎉 <b>Crowstack Session Successfully Switched!</b>\n\nAb se sabhi OTP requests aur <code>export_file</code> calls <b>Marin (#8282846997)</b> main profile aur Chrome headers ke sath execute hongi.\n\n{id_text}",
+                                reply_markup=id_kb,
+                            )
+                            continue
+
+                        elif cb_data == "set_profile_custom":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_custom_init_data"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                "✏️ <b>Custom Telegram X-Tg-Init-Data Token Bhejein:</b>\n\n<i>(Apna custom <code>query_id=...&user=...&hash=...</code> token string yahan paste karein)</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
                         else:
                             await answer_tg_callback(client, cb_id)
                             continue
@@ -3242,10 +3479,13 @@ async def bot_loop():
                         cur_p = get_store_price()
                         cur_upi = get_store_upi_id()
                         cur_name = get_store_upi_name()
+                        prof_key = get_crowstack_profile_key(chat_id)
+                        prof_name = CROWSTACK_PROFILES.get(prof_key, CROWSTACK_PROFILES["new"])["name"]
 
                         settings_text = (
                             f"⚙️ <b>MEESHO STORE & BOT SETTINGS</b>\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"👤 <b>Active Crowstack Session:</b> <code>{prof_name}</code>\n"
                             f"💰 <b>Meesho JSON Price:</b> <b>₹{cur_p}</b>\n"
                             f"📲 <b>UPI ID:</b> <code>{cur_upi}</code>\n"
                             f"👤 <b>Payee Name:</b> <b>{cur_name}</b>\n"
@@ -3256,6 +3496,9 @@ async def bot_loop():
                         settings_kb = {
                             "inline_keyboard": [
                                 [
+                                    {"text": "👤 Crowstack Session / Identity", "callback_data": "open_identity_menu"},
+                                ],
+                                [
                                     {"text": "🔗 Change Referral Link", "callback_data": "set_ref_link"},
                                 ],
                                 [
@@ -3265,6 +3508,63 @@ async def bot_loop():
                             ]
                         }
                         await send_tg_message(client, chat_id, settings_text, reply_markup=settings_kb)
+
+                    # ── 👤 Crowstack Session / Identity (/identity, /profile, /session) ──
+                    elif text in ("👤 Switch Identity", "👤 API Session", "/identity", "/profile", "/session", "/identities"):
+                        id_text, id_kb = build_identity_settings_message_and_markup(chat_id)
+                        await send_tg_message(client, chat_id, id_text, reply_markup=id_kb)
+
+                    elif text.startswith("/setprofile"):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and parts[1].strip().lower() in ("new", "main", "rem", "marin"):
+                            choice = "new" if parts[1].strip().lower() in ("new", "rem") else "main"
+                            update_user_config(chat_id, {"crowstack_profile": choice})
+                            id_text, id_kb = build_identity_settings_message_and_markup(chat_id)
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🎉 <b>Crowstack Session Switched to {choice.upper()}!</b>\n\n{id_text}",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/setprofile new</code> ya <code>/setprofile main</code>")
+
+                    elif text.startswith("/setinitdata"):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and "query_id" in parts[1] and "hash" in parts[1]:
+                            raw_init = parts[1].strip()
+                            update_user_config(chat_id, {"crowstack_profile": "custom", "crowstack_custom_init_data": raw_init})
+                            id_text, id_kb = build_identity_settings_message_and_markup(chat_id)
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🎉 <b>Custom Telegram X-Tg-Init-Data Successfully Saved!</b>\n\n{id_text}",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            state["manual_step"] = "awaiting_custom_init_data"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "✏️ <b>Custom Telegram X-Tg-Init-Data Token Bhejein:</b>\n\n<i>(Apna custom <code>query_id=...&user=...&hash=...</code> token string yahan paste karein)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_custom_init_data":
+                        raw_init = text.strip()
+                        if "query_id" in raw_init or "hash" in raw_init or "user" in raw_init:
+                            update_user_config(chat_id, {"crowstack_profile": "custom", "crowstack_custom_init_data": raw_init})
+                            state["manual_step"] = None
+                            id_text, id_kb = build_identity_settings_message_and_markup(chat_id)
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🎉 <b>Custom Telegram Session Token Saved!</b>\n\n{id_text}",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(client, chat_id, "❌ Invalid token format! Token mein <code>query_id</code>, <code>user</code> ya <code>hash</code> hona chahiye.")
 
                     # ── 🔗 Set Referral Link (/setreferral <link>) ──
                     elif text.startswith("/setreferral") or text.startswith("/setref") or text == "🔗 Set Referral":
