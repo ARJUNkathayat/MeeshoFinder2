@@ -2715,7 +2715,17 @@ async def bot_loop():
                     },
                     timeout=35.0,
                 )
+                if r.status_code != 200:
+                    print(f"[{time.strftime('%H:%M:%S')}] [TG Polling Warning] HTTP {r.status_code}: {r.text[:200]}")
+                    await asyncio.sleep(2)
+                    continue
+
                 data = r.json()
+                if not data.get("ok"):
+                    print(f"[{time.strftime('%H:%M:%S')}] [TG getUpdates Error] {data.get('description')}")
+                    await asyncio.sleep(3)
+                    continue
+
                 updates = data.get("result", [])
 
                 for u in updates:
