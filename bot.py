@@ -21,6 +21,7 @@ Key Features:
 import os
 import sys
 import time
+import datetime
 import re
 import json
 import uuid
@@ -629,12 +630,73 @@ async def record_created_account(phone: str, user_id: str, server: str, worker_i
         regenerate_all_summary_reports()
 
 
+def get_day_wise_breakdown() -> list[tuple[str, int]]:
+    """Returns list of (YYYY-MM-DD, count) tuples sorted descending by date."""
+    history = load_accounts_history()
+    day_counts = {}
+    for item in history:
+        dt_str = str(item.get("created_at", ""))[:10]
+        if dt_str and len(dt_str) == 10:
+            day_counts[dt_str] = day_counts.get(dt_str, 0) + 1
+    sorted_days = sorted(day_counts.keys(), reverse=True)
+    return [(d, day_counts[d]) for d in sorted_days]
+
+
+def reset_session_stats(chat_id: int | str):
+    """Resets in-memory live hunting counters for the specified chat/session."""
+    cid = int(chat_id) if str(chat_id).isdigit() else chat_id
+    state = ACTIVE_TASKS.get(cid) or ACTIVE_TASKS.get(str(chat_id))
+    if state:
+        state["attempts"] = 0
+        state["accounts_created"] = 0
+        state["registered_count"] = 0
+        state["start_time"] = time.time()
+        worker_states = state.get("worker_states", {})
+        for w_st in worker_states.values():
+            w_st["attempts"] = 0
+            w_st["accounts"] = 0
+
+
+async def reset_today_accounts() -> int:
+    """Removes created account records for today from persistent history."""
+    async with ACCOUNTS_LOCK:
+        history = load_accounts_history()
+        today_prefix = time.strftime("%Y-%m-%d")
+        remaining = [x for x in history if not str(x.get("created_at", "")).startswith(today_prefix)]
+        deleted_count = len(history) - len(remaining)
+        for idx, it in enumerate(remaining, start=1):
+            it["id"] = idx
+        save_accounts_history(remaining)
+        regenerate_all_summary_reports()
+        return deleted_count
+
+
+async def reset_all_accounts_history() -> int:
+    """Clears all-time created account records and regenerates report files."""
+    async with ACCOUNTS_LOCK:
+        history = load_accounts_history()
+        deleted_count = len(history)
+        save_accounts_history([])
+        regenerate_all_summary_reports()
+        return deleted_count
+
+
 def generate_accounts_summary_text() -> str:
     history = load_accounts_history()
     tx_history = load_transactions_history()
     total = len(history)
     today_prefix = time.strftime("%Y-%m-%d")
-    today_count = sum(1 for x in history if x.get("created_at", "").startswith(today_prefix))
+    today_count = sum(1 for x in history if str(x.get("created_at", "")).startswith(today_prefix))
+
+    # Day-wise breakdown
+    day_breakdown = get_day_wise_breakdown()
+    day_lines = []
+    for d, cnt in day_breakdown[:7]:
+        label = f"📅 Today ({d})" if d == today_prefix else f"📆 {d}"
+        day_lines.append(f"• <b>{label}:</b> <b>{cnt}</b> accounts")
+    if not day_lines:
+        day_lines.append(f"• <b>📅 Today ({today_prefix}):</b> 0 accounts")
+    day_history_str = "\n".join(day_lines)
 
     server_counts = {}
     worker_counts = {}
@@ -671,6 +733,7 @@ def generate_accounts_summary_text() -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Total Accounts Created:</b> <b>{total}</b>\n"
         f"📅 <b>Created Today ({today_prefix}):</b> <b>{today_count}</b>\n\n"
+        f"🗓️ <b>Day-Wise History:</b>\n{day_history_str}\n\n"
         f"🏷️ <b>Server Breakdown:</b> {srv_breakdown}\n"
         f"⚡ <b>Worker Breakdown:</b> {worker_breakdown}\n\n"
         f"🕒 <b>Latest Created Accounts:</b>\n{recent_text}\n\n"
@@ -2256,6 +2319,117 @@ async def build_keys_view_message_and_markup(client: httpx.AsyncClient, chat_id:
     return "\n".join(lines), inline_kb
 
 
+async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id: int | str, state: dict = None) -> tuple[str, dict]:
+    cfg = get_user_config(chat_id)
+    keys = get_user_api_keys(chat_id)
+    sel_servers = cfg.get("selected_servers", ["5841"])
+    server_names = ", ".join(f"Server {s}" for s in sel_servers)
+
+    history = load_accounts_history()
+    total_all_time = len(history)
+    today_prefix = time.strftime("%Y-%m-%d")
+    today_count = sum(1 for x in history if str(x.get("created_at", "")).startswith(today_prefix))
+
+    # Day-wise aggregate
+    day_counts = {}
+    for item in history:
+        dt_str = str(item.get("created_at", ""))[:10]
+        if dt_str and len(dt_str) == 10:
+            day_counts[dt_str] = day_counts.get(dt_str, 0) + 1
+
+    sorted_days = sorted(day_counts.keys(), reverse=True)
+    day_lines = []
+    for d in sorted_days[:5]:
+        label = f"📅 Today ({d})" if d == today_prefix else f"📆 {d}"
+        day_lines.append(f"• <b>{label}:</b> <b>{day_counts[d]}</b> accounts")
+    if not day_lines:
+        day_lines.append(f"• <b>📅 Today ({today_prefix}):</b> 0 accounts")
+    day_history_str = "\n".join(day_lines)
+
+    cid = int(chat_id) if str(chat_id).isdigit() else chat_id
+    if state is None:
+        state = ACTIVE_TASKS.get(cid) or ACTIVE_TASKS.get(str(chat_id)) or {}
+
+    balances_dict = await fetch_all_key_balances(client, keys, max_concurrency=25)
+    total_bal = sum(balances_dict.values())
+
+    is_running = state.get("hunting", False)
+    if is_running:
+        runtime_mins = int((time.time() - state.get("start_time", time.time())) // 60)
+        worker_lines = []
+        max_disp = min(10, len(keys))
+        for idx in range(1, max_disp + 1):
+            k = keys[idx - 1]
+            w_st = state.get("worker_states", {}).get(idx, {})
+            w_bal = balances_dict.get(k, 0.0)
+            worker_lines.append(
+                f"• <b>Worker #{idx} ({k[:4]}...{k[-4:]})</b>: <code>{w_st.get('status', 'Running')}</code> | Att: {w_st.get('attempts', 0)} | Created: {w_st.get('accounts', 0)} | Bal: ₹{w_bal:.2f}"
+            )
+        if len(keys) > max_disp:
+            worker_lines.append(f"• <i>... and {len(keys) - max_disp} more workers active</i>")
+        w_details = "\n".join(worker_lines) if worker_lines else "<i>No active workers</i>"
+
+        stats_text = (
+            f"📊 <b>LIVE MULTI-KEY HUNTING STATS</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ <b>Status:</b> 🟢 Running ({len(keys)} Parallel Workers)\n"
+            f"⏱️ <b>Uptime:</b> {runtime_mins} minutes\n"
+            f"🏷️ <b>Active Servers:</b> <code>{server_names}</code>\n\n"
+            f"📅 <b>DAY-WISE CREATED ACCOUNTS:</b>\n"
+            f"{day_history_str}\n"
+            f"📊 <b>Total All-Time Accounts:</b> <b>{total_all_time}</b>\n\n"
+            f"🔄 <b>Session Attempts:</b> {state.get('attempts', 0)}\n"
+            f"❌ <b>Registered Numbers Cancelled:</b> {state.get('registered_count', 0)}\n"
+            f"🎉 <b>Session Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
+            f"💵 <b>Total Pool Wallet:</b> <b>₹{total_bal:.2f}</b>\n\n"
+            f"⚡ <b>Per-Worker Live Performance:</b>\n{w_details}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👇 <i>Niche button dabakar live refresh ya counter reset karein:</i>"
+        )
+    else:
+        key_balances = []
+        max_disp = min(10, len(keys))
+        for idx in range(1, max_disp + 1):
+            k = keys[idx - 1]
+            bal = balances_dict.get(k, 0.0)
+            masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
+            key_balances.append(f"• <b>Key #{idx} ({masked}):</b> ₹{bal:.2f}")
+        if len(keys) > max_disp:
+            key_balances.append(f"• <i>... and {len(keys) - max_disp} more keys configured</i>")
+        k_bal_str = "\n".join(key_balances) if key_balances else "<i>No keys configured</i>"
+
+        stats_text = (
+            f"📊 <b>BOT MASTER STATS & DAY-WISE REPORT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ <b>Status:</b> ⚪ Idle (Not running)\n"
+            f"🔑 <b>Configured Keys:</b> <b>{len(keys)} Keys</b>\n"
+            f"🏷️ <b>Configured Servers:</b> <code>{server_names}</code>\n\n"
+            f"📅 <b>DAY-WISE CREATED ACCOUNTS:</b>\n"
+            f"{day_history_str}\n"
+            f"📊 <b>Total All-Time Accounts:</b> <b>{total_all_time}</b>\n\n"
+            f"🔄 <b>Last Session Attempts:</b> {state.get('attempts', 0) if state else 0}\n"
+            f"🎉 <b>Last Session Created:</b> {state.get('accounts_created', 0) if state else 0}\n\n"
+            f"💰 <b>Key Balances:</b>\n{k_bal_str}\n"
+            f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👇 <i>Niche button dabakar live refresh ya counter reset karein:</i>"
+        )
+
+    stats_kb = {
+        "inline_keyboard": [
+            [
+                {"text": "🔄 Refresh Live Stats", "callback_data": "refresh_stats_view"},
+                {"text": "⚡ Reset Session Stats", "callback_data": "reset_session_action"},
+            ],
+            [
+                {"text": "📅 Reset Today's Count", "callback_data": "reset_today_action"},
+                {"text": "🗑️ Reset All History", "callback_data": "reset_history_prompt"},
+            ]
+        ]
+    }
+    return stats_text, stats_kb
+
+
 def build_identity_settings_message_and_markup(chat_id: int | str):
     cfg = get_user_config(chat_id)
     cur_prof = cfg.get("crowstack_profile", "new")
@@ -3261,6 +3435,75 @@ async def bot_loop():
                                 content=txt_content,
                                 caption=f"🔐 <b>OTP Doctor Keys Backup:</b> <code>{len(keys)}</code> API keys exported.\n<i>(Direct backup file saved across server restarts)</i>",
                             )
+                            continue
+
+                        # ── Day-Wise & Stats Reset Callbacks ──
+                        elif cb_data == "refresh_stats_view":
+                            await answer_tg_callback(client, cb_id, "🔄 Updating Live Stats...")
+                            st = ACTIVE_TASKS.get(cb_chat_id, {})
+                            stats_text, stats_kb = await build_stats_view_message_and_markup(client, cb_chat_id, st)
+                            await send_tg_message(client, cb_chat_id, stats_text, reply_markup=stats_kb)
+                            continue
+
+                        elif cb_data == "reset_session_action":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            reset_session_stats(cb_chat_id)
+                            await answer_tg_callback(client, cb_id, "⚡ Active Session Stats Reset!")
+                            st = ACTIVE_TASKS.get(cb_chat_id, {})
+                            stats_text, stats_kb = await build_stats_view_message_and_markup(client, cb_chat_id, st)
+                            await send_tg_message(client, cb_chat_id, f"✅ <b>Active Session Counters Reset!</b>\n\n{stats_text}", reply_markup=stats_kb)
+                            continue
+
+                        elif cb_data == "reset_today_action":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            del_c = await reset_today_accounts()
+                            await answer_tg_callback(client, cb_id, f"📅 Today's {del_c} accounts reset!")
+                            st = ACTIVE_TASKS.get(cb_chat_id, {})
+                            stats_text, stats_kb = await build_stats_view_message_and_markup(client, cb_chat_id, st)
+                            await send_tg_message(client, cb_chat_id, f"📅 <b>Today's accounts reset!</b> ({del_c} records cleared)\n\n{stats_text}", reply_markup=stats_kb)
+                            continue
+
+                        elif cb_data == "reset_history_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id)
+                            confirm_kb = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "⚠️ Yes, Delete All History", "callback_data": "confirm_reset_history_action"},
+                                        {"text": "❌ Cancel", "callback_data": "cancel_reset_history"},
+                                    ]
+                                ]
+                            }
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                "⚠️ <b>CONFIRM ALL-TIME HISTORY RESET:</b>\n\nKya aap sach mein <b>sab accounts ki history delete</b> karna chahte hain?\nYeh action irreversible hai.",
+                                reply_markup=confirm_kb,
+                            )
+                            continue
+
+                        elif cb_data == "confirm_reset_history_action":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            del_all = await reset_all_accounts_history()
+                            await answer_tg_callback(client, cb_id, f"🗑️ All {del_all} accounts deleted!")
+                            st = ACTIVE_TASKS.get(cb_chat_id, {})
+                            stats_text, stats_kb = await build_stats_view_message_and_markup(client, cb_chat_id, st)
+                            await send_tg_message(client, cb_chat_id, f"🗑️ <b>All-Time History Cleared!</b> ({del_all} accounts removed)\n\n{stats_text}", reply_markup=stats_kb)
+                            continue
+
+                        elif cb_data == "cancel_reset_history":
+                            await answer_tg_callback(client, cb_id, "Cancelled.")
+                            st = ACTIVE_TASKS.get(cb_chat_id, {})
+                            stats_text, stats_kb = await build_stats_view_message_and_markup(client, cb_chat_id, st)
+                            await send_tg_message(client, cb_chat_id, stats_text, reply_markup=stats_kb)
                             continue
 
                         # ── Crowstack Failover User Choice Callbacks ──
@@ -4594,71 +4837,39 @@ async def bot_loop():
                         num = clean_phone(text)
                         await handle_manual_number_check(client, chat_id, state, num)
 
-                    # ── 📊 Stats ──
+                    # ── 📊 Stats & Day-Wise Breakdown ──
                     elif text.startswith("/stats") or text == "📊 Stats":
-                        keys = get_user_api_keys(chat_id)
-                        sel_servers = cfg.get("selected_servers", ["5841"])
-                        server_names = ", ".join(f"Server {s}" for s in sel_servers)
+                        stats_text, stats_kb = await build_stats_view_message_and_markup(client, chat_id, state)
+                        await send_tg_message(client, chat_id, stats_text, reply_markup=stats_kb)
 
-                        if state and state.get("hunting"):
-                            runtime_mins = int((time.time() - state.get("start_time", time.time())) // 60)
-                            worker_lines = []
-                            # Fetch balances in parallel at high speed
-                            balances_dict = await fetch_all_key_balances(client, keys, max_concurrency=25)
-                            total_bal = sum(balances_dict.values())
-                            
-                            max_disp = min(10, len(keys))
-                            for idx in range(1, max_disp + 1):
-                                k = keys[idx - 1]
-                                w_st = state.get("worker_states", {}).get(idx, {})
-                                w_bal = balances_dict.get(k, 0.0)
-                                worker_lines.append(
-                                    f"• <b>Worker #{idx} ({k[:4]}...{k[-4:]})</b>: <code>{w_st.get('status', 'Running')}</code> | Att: {w_st.get('attempts', 0)} | Created: {w_st.get('accounts', 0)} | Bal: ₹{w_bal:.2f}"
-                                )
-                            if len(keys) > max_disp:
-                                worker_lines.append(f"• <i>... and {len(keys) - max_disp} more workers active</i>")
-                            w_details = "\n".join(worker_lines) if worker_lines else "<i>No active workers</i>"
-                            stats_text = (
-                                f"📊 <b>LIVE MULTI-KEY HUNTING STATS</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"⚡ <b>Status:</b> 🟢 Running ({len(keys)} Parallel Workers)\n"
-                                f"⏱️ <b>Uptime:</b> {runtime_mins} minutes\n"
-                                f"🏷️ <b>Active Servers:</b> <code>{server_names}</code>\n"
-                                f"🔄 <b>Total Combined Attempts:</b> {state.get('attempts', 0)}\n"
-                                f"❌ <b>Registered Numbers Cancelled:</b> {state.get('registered_count', 0)}\n"
-                                f"🎉 <b>Total Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
-                                f"💵 <b>Total Pool Wallet:</b> <b>₹{total_bal:.2f}</b>\n\n"
-                                f"⚡ <b>Per-Worker Live Performance:</b>\n{w_details}\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"<i>Full report ke liye <b>/summary</b> dabayein.</i>"
-                            )
-                        else:
-                            balances_dict = await fetch_all_key_balances(client, keys, max_concurrency=25)
-                            total_bal = sum(balances_dict.values())
-                            key_balances = []
-                            max_disp = min(10, len(keys))
-                            for idx in range(1, max_disp + 1):
-                                k = keys[idx - 1]
-                                bal = balances_dict.get(k, 0.0)
-                                masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
-                                key_balances.append(f"• <b>Key #{idx} ({masked}):</b> ₹{bal:.2f}")
-                            if len(keys) > max_disp:
-                                key_balances.append(f"• <i>... and {len(keys) - max_disp} more keys configured</i>")
-                            k_bal_str = "\n".join(key_balances) if key_balances else "<i>No keys configured</i>"
-                            stats_text = (
-                                f"📊 <b>BOT MASTER STATS</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"⚡ <b>Status:</b> ⚪ Idle (Not running)\n"
-                                f"🔑 <b>Configured Keys:</b> <b>{len(keys)} Keys</b>\n"
-                                f"🏷️ <b>Configured Servers:</b> <code>{server_names}</code>\n"
-                                f"🔄 <b>Last Session Attempts:</b> {state.get('attempts', 0) if state else 0}\n"
-                                f"🎉 <b>Last Session Created:</b> {state.get('accounts_created', 0) if state else 0}\n\n"
-                                f"💰 <b>Key Balances:</b>\n{k_bal_str}\n"
-                                f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"Start karne ke liye <b>🚀 Start Hunt</b> dabayein."
-                            )
-                        await send_tg_message(client, chat_id, stats_text)
+                    # ── ⚡ Reset Session Counters (/resetstats, /resetsession) ──
+                    elif text in ("/resetstats", "/resetsession"):
+                        reset_session_stats(chat_id)
+                        stats_text, stats_kb = await build_stats_view_message_and_markup(client, chat_id, state)
+                        await send_tg_message(client, chat_id, f"⚡ <b>Session Stats Reset Successfully!</b>\n\n{stats_text}", reply_markup=stats_kb)
+
+                    # ── 📅 Reset Today's Created Accounts (/resetday, /resettoday) ──
+                    elif text in ("/resetday", "/resettoday"):
+                        del_c = await reset_today_accounts()
+                        stats_text, stats_kb = await build_stats_view_message_and_markup(client, chat_id, state)
+                        await send_tg_message(client, chat_id, f"📅 <b>Today's accounts reset!</b> ({del_c} records cleared)\n\n{stats_text}", reply_markup=stats_kb)
+
+                    # ── 🗑️ Reset All-Time History (/resethistory, /clearhistory) ──
+                    elif text in ("/resethistory", "/clearhistory"):
+                        confirm_kb = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "⚠️ Yes, Delete All History", "callback_data": "confirm_reset_history_action"},
+                                    {"text": "❌ Cancel", "callback_data": "cancel_reset_history"},
+                                ]
+                            ]
+                        }
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            "⚠️ <b>CONFIRM ALL-TIME HISTORY RESET:</b>\n\nKya aap sach mein <b>sab accounts ki history delete</b> karna chahte hain?\nYeh action irreversible hai.",
+                            reply_markup=confirm_kb,
+                        )
 
                     # ── 💰 Balance (High Speed Parallel Polling) ──
                     elif text.startswith("/balance") or text == "💰 Balance":
