@@ -325,18 +325,59 @@ def update_user_config(chat_id: int | str, updates: dict):
     save_all_configs(configs)
 
 
+SAVED_KEYS_FILE = "saved_keys.json"
+
+
+def load_saved_keys_global() -> list[str]:
+    keys = []
+    if os.path.exists(SAVED_KEYS_FILE):
+        try:
+            with open(SAVED_KEYS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    keys.extend([k.strip() for k in data if isinstance(k, str) and len(k.strip()) >= 8])
+        except Exception:
+            pass
+
+    env_keys = os.getenv("OTPDOCTOR_API_KEYS", "")
+    if env_keys:
+        for k in re.split(r"[\s,\n]+", env_keys):
+            clean = k.strip()
+            if len(clean) >= 8 and clean not in keys:
+                keys.append(clean)
+
+    if DEFAULT_OTP_DOCTOR_KEY and DEFAULT_OTP_DOCTOR_KEY not in keys:
+        keys.append(DEFAULT_OTP_DOCTOR_KEY)
+    return keys
+
+
+def save_saved_keys_global(keys: list[str]):
+    try:
+        with open(SAVED_KEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump(keys, f, indent=2)
+    except Exception as e:
+        print(f"[SavedKeys Save Error] {e}")
+
+
 # ─── Multi-Key Management Helpers ─────────────────────────────────────────────
-def get_user_api_keys(chat_id: int | str) -> list[str]:
-    cfg = get_user_config(chat_id)
-    keys = cfg.get("api_keys")
-    if isinstance(keys, list) and len(keys) > 0:
-        valid = [k.strip() for k in keys if isinstance(k, str) and len(k.strip()) >= 8]
-        if valid:
-            return valid
-    single = (cfg.get("api_key") or DEFAULT_OTP_DOCTOR_KEY).strip()
-    if single and len(single) >= 8:
-        return [single]
-    return []
+def get_user_api_keys(chat_id: int | str = None) -> list[str]:
+    keys = []
+    if chat_id:
+        cfg = get_user_config(chat_id)
+        user_keys = cfg.get("api_keys")
+        if isinstance(user_keys, list) and len(user_keys) > 0:
+            keys.extend([k.strip() for k in user_keys if isinstance(k, str) and len(k.strip()) >= 8])
+        single = (cfg.get("api_key") or "").strip()
+        if single and len(single) >= 8 and single not in keys:
+            keys.append(single)
+
+    # Merge with persistent global saved keys
+    global_keys = load_saved_keys_global()
+    for gk in global_keys:
+        if gk not in keys:
+            keys.append(gk)
+
+    return keys
 
 
 def add_user_api_key(chat_id: int | str, new_key: str) -> list[str]:
@@ -346,7 +387,22 @@ def add_user_api_key(chat_id: int | str, new_key: str) -> list[str]:
         keys.append(cleaned)
     primary = keys[0] if keys else ""
     update_user_config(chat_id, {"api_keys": keys, "api_key": primary})
+    save_saved_keys_global(keys)
     return keys
+
+
+def add_user_api_keys_bulk(chat_id: int | str, new_keys: list[str]) -> list[str]:
+    keys = list(get_user_api_keys(chat_id))
+    added = []
+    for raw in new_keys:
+        cleaned = raw.strip()
+        if len(cleaned) >= 8 and cleaned not in keys:
+            keys.append(cleaned)
+            added.append(cleaned)
+    primary = keys[0] if keys else ""
+    update_user_config(chat_id, {"api_keys": keys, "api_key": primary})
+    save_saved_keys_global(keys)
+    return added
 
 
 def remove_user_api_key(chat_id: int | str, target: int | str) -> list[str]:
@@ -363,11 +419,13 @@ def remove_user_api_key(chat_id: int | str, target: int | str) -> list[str]:
             keys.remove(target)
     primary = keys[0] if keys else ""
     update_user_config(chat_id, {"api_keys": keys, "api_key": primary})
+    save_saved_keys_global(keys)
     return keys
 
 
 def clear_user_api_keys(chat_id: int | str):
     update_user_config(chat_id, {"api_keys": [], "api_key": ""})
+    save_saved_keys_global([])
 
 
 # ─── Persistent Created Accounts Summary & History ────────────────────────────
@@ -921,6 +979,23 @@ async def otpd_balance(client: httpx.AsyncClient, api_key: str, force_refresh: b
     return "0.00"
 
 
+async def fetch_all_key_balances(client: httpx.AsyncClient, keys: list[str], max_concurrency: int = 25) -> dict[str, str]:
+    """Fetches balances for hundreds of keys concurrently using Semaphore without rate-limit delay."""
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _fetch(k):
+        async with sem:
+            bal = await otpd_balance(client, k)
+            return k, bal
+
+    results = await asyncio.gather(*[_fetch(k) for k in keys], return_exceptions=True)
+    res_map = {}
+    for item in results:
+        if isinstance(item, tuple) and len(item) == 2:
+            res_map[item[0]] = item[1]
+    return res_map
+
+
 async def otpd_buy(client: httpx.AsyncClient, api_key: str, svc_id: str) -> dict:
     try:
         r = await client.get(OTP_DOCTOR_BASE, params={"action": "getNumber", "api_key": api_key, "service": svc_id}, timeout=15)
@@ -1231,78 +1306,133 @@ async def crowstack_export_file(client: httpx.AsyncClient, chat_id: int | str = 
         return {"ok": False, "error": str(e)}
 
 
-async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None) -> dict:
-    """Dispatches OTP using Crowstack API (primary) -> Hidenfree API -> GemixAI API (with ₹200 reroll) -> direct OTPLESS."""
-    # 1. Primary: Crowstack API (with dynamic user referral link and selected session profile)
+PENDING_OTP_FALLBACK_DECISIONS = {}  # {phone: asyncio.Future()}
+
+
+async def request_otp_fallback_decision(client: httpx.AsyncClient, chat_id: int | str, phone: str, worker_id: int = 1, server: str = "") -> str:
+    """
+    Asks user via Telegram when both Crowstack Rem & Marin fail.
+    Waits 25 seconds for inline response. If timeout or rejected, returns 'cancel' to auto-cancel number for refund.
+    """
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    PENDING_OTP_FALLBACK_DECISIONS[phone] = fut
+
+    w_tag = f"Worker #{worker_id}" if worker_id else "Worker"
+    s_tag = f"Server {server}" if server else "Server"
+    msg_text = (
+        f"⚠️ <b>CROWSTACK SESSIONS FAILOVER!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📱 <b>Mobile:</b> <code>+91{phone}</code> ({w_tag} | {s_tag})\n"
+        f"❌ <b>Rem (#8912242607) & Marin (#8282846997) Dono Fail Ho Gaye!</b>\n\n"
+        f"👉 <b>Kya action lena hai?</b>\n"
+        f"• <b>GemixAI:</b> ₹200 OFF reroll karke OTP send karein.\n"
+        f"• <b>Cancel Number:</b> Number refund ke liye turant cancel karein.\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏳ <i>Agar 25 sec mein response nahi aaya to number auto-cancel ho jayega.</i>"
+    )
+    kb = {
+        "inline_keyboard": [
+            [
+                {"text": "🟢 Use GemixAI (₹200 OFF)", "callback_data": f"fb_gemix_{phone}"},
+                {"text": "❌ Cancel Number (Refund)", "callback_data": f"fb_cancel_{phone}"},
+            ]
+        ]
+    }
+    await send_tg_message(client, chat_id, msg_text, reply_markup=kb)
+
     try:
-        cur_ref = get_referral_link()
-        payload = {"phone": phone, "ref_link": cur_ref, "force": True}
-        headers = get_crowstack_headers(chat_id)
-        resp = await client.post(
-            f"{CROWSTACK_BASE}/send-otp",
-            headers=headers,
-            json=payload,
-            timeout=15,
+        decision = await asyncio.wait_for(fut, timeout=25.0)
+        return decision
+    except asyncio.TimeoutError:
+        print(f"[FallbackDecision] ⏰ 25s Timeout reached for {phone}. Auto-cancelling for refund...")
+        await send_tg_message(
+            client,
+            chat_id,
+            f"⏰ <b>Decision Timeout (25s):</b> <code>+91{phone}</code> par response nahi mila. Number auto-cancel kiya jaa raha hai refund ke liye.",
         )
-        if resp.status_code == 200:
-            data = resp.json() or {}
-            if data.get("ok"):
-                return {
-                    "ok": True,
-                    "method": "crowstack",
-                    "registered": data.get("registered"),
-                    "bucket": data.get("bucket"),
-                    "session": {
-                        "method": "crowstack",
-                        "phone": phone,
-                        "instance_id": dev["instance_id"],
-                        "chat_id": chat_id,
-                    },
-                }
-            else:
-                print(f"[Crowstack send-otp rejected]: {data}")
-    except Exception as e:
-        print(f"[Crowstack send-otp warning]: {e}")
+        return "cancel"
+    finally:
+        PENDING_OTP_FALLBACK_DECISIONS.pop(phone, None)
 
-    # 2. Secondary Fallback: Hidenfree API (with offer hunt)
-    try:
-        print(f"[Fallback] Crowstack unavailable, trying Hidenfree API for +91{phone}...")
+
+async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None, worker_id: int = 1, server: str = "") -> dict:
+    """Dispatches OTP using Smart Auto-Failover: Crowstack Primary (Rem/Marin) -> Crowstack Alternate -> GemixAI (Prompted/Reroll)."""
+    cur_ref = get_referral_link()
+    cur_prof = get_crowstack_profile_key(chat_id)
+
+    # Ordered list of Crowstack profiles to try
+    profiles_to_try = [cur_prof]
+    if cur_prof == "new":
+        profiles_to_try.append("main")
+    elif cur_prof == "main":
+        profiles_to_try.append("new")
+    else:
+        profiles_to_try.extend(["new", "main"])
+
+    crowstack_errors = []
+    for prof_key in profiles_to_try:
         try:
-            await client.post(f"{HIDENFREE_BASE}/offer/hunt", headers=HIDENFREE_HEADERS, json={"target": 200}, timeout=8)
-        except Exception:
-            pass
+            p_info = CROWSTACK_PROFILES.get(prof_key, CROWSTACK_PROFILES["new"])
+            prof_name = p_info["name"]
+            print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] Trying {prof_name} for +91{phone}...")
 
-        chk_resp = await client.post(f"{HIDENFREE_BASE}/login/check-phone", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=10)
-        chk_data = chk_resp.json() if chk_resp.status_code == 200 else {}
+            headers = get_crowstack_headers(chat_id)
+            headers["User-Agent"] = p_info["user_agent"]
+            headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
+            headers["sec-ch-ua"] = p_info["sec_ch_ua"]
+            headers["sec-ch-ua-platform"] = p_info["sec_ch_ua_platform"]
 
-        req_resp = await client.post(f"{HIDENFREE_BASE}/login/request-otp", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=15)
-        if req_resp.status_code == 200:
-            data = req_resp.json() or {}
-            if data.get("ok"):
-                return {
-                    "ok": True,
-                    "method": "hidenfree",
-                    "registered": data.get("registered", chk_data.get("registered")),
-                    "bucket": chk_data.get("offer_bucket") or 200,
-                    "session": {
-                        "method": "hidenfree",
-                        "phone": phone,
-                        "instance_id": dev["instance_id"],
-                        "chat_id": chat_id,
-                    },
-                }
+            payload = {"phone": phone, "ref_link": cur_ref, "force": True}
+            resp = await client.post(
+                f"{CROWSTACK_BASE}/send-otp",
+                headers=headers,
+                json=payload,
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json() or {}
+                if data.get("ok"):
+                    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] ✅ OTP sent successfully using {prof_name}!")
+                    return {
+                        "ok": True,
+                        "method": "crowstack",
+                        "profile": prof_key,
+                        "registered": data.get("registered"),
+                        "bucket": data.get("bucket"),
+                        "session": {
+                            "method": "crowstack",
+                            "profile": prof_key,
+                            "phone": phone,
+                            "instance_id": dev["instance_id"],
+                            "chat_id": chat_id,
+                        },
+                    }
+                else:
+                    err_msg = data.get("error") or data.get("message") or str(data)
+                    crowstack_errors.append(f"{prof_name}: {err_msg}")
+                    print(f"[Crowstack {prof_name} rejected]: {err_msg}")
             else:
-                print(f"[Hidenfree request-otp rejected]: {data}")
-    except Exception as e:
-        print(f"[Hidenfree request-otp error]: {e}")
+                crowstack_errors.append(f"{prof_name}: HTTP {resp.status_code}")
+        except Exception as e:
+            crowstack_errors.append(f"{prof_name}: {e}")
+            print(f"[Crowstack {prof_key} error]: {e}")
 
-    # 3. Tertiary Fallback: GemixAI API (with Reroll until ₹200 OFF is found)
+    print(f"[Crowstack Failover] All Crowstack sessions failed for +91{phone}: {crowstack_errors}")
+
+    # If both Crowstack sessions failed -> Ask user via Telegram or auto-cancel on timeout
+    if chat_id:
+        user_choice = await request_otp_fallback_decision(client, chat_id, phone, worker_id, server)
+        if user_choice != "gemix":
+            return {"ok": False, "error": f"Crowstack Rem & Marin failed ({'; '.join(crowstack_errors)}) & user chose to cancel."}
+
+    # Execute GemixAI Fallback (with ₹200 OFF Reroll)
     try:
-        print(f"[Fallback] Hidenfree unavailable, trying GemixAI API for +91{phone} (rerolling for ₹200 OFF)...")
+        print(f"[Fallback] Executing GemixAI API for +91{phone} (rerolling for ₹200 OFF)...")
         offer_bucket = 0
-        for rr_try in range(1, 31):
+        for rr_try in range(1, 25):
             try:
-                rr_resp = await client.post(f"{GEMIXAI_BASE}/reroll", headers=GEMIXAI_HEADERS, timeout=10)
+                rr_resp = await client.post(f"{GEMIXAI_BASE}/reroll", headers=GEMIXAI_HEADERS, timeout=8)
                 if rr_resp.status_code == 200:
                     rr_data = rr_resp.json() or {}
                     offer = rr_data.get("offer") or {}
@@ -1313,7 +1443,7 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
                         break
             except Exception:
                 pass
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
 
         if not offer_bucket:
             offer_bucket = 200
@@ -1351,59 +1481,75 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
                 }
             else:
                 print(f"[GemixAI send-otp rejected]: {otp_data}")
+                return {"ok": False, "error": f"GemixAI rejected: {otp_data}"}
     except Exception as e:
         print(f"[GemixAI send-otp error]: {e}")
+        return {"ok": False, "error": f"GemixAI error: {str(e)}"}
 
-    # 4. Quaternary Fallback: Direct OTPLESS
-    return await send_meesho_otpless_fallback(client, phone, dev)
+    return {"ok": False, "error": "All OTP dispatch methods failed"}
 
 
 async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict, chat_id: int | str = None) -> dict:
-    """Verifies OTP via Crowstack, Hidenfree, GemixAI, or fallback to OTPLESS."""
+    """Verifies OTP via Crowstack (Rem/Marin auto-failover), Hidenfree, GemixAI, or fallback to OTPLESS."""
     cid = chat_id or session.get("chat_id")
     # Method 1: Crowstack
     if session.get("method") == "crowstack":
-        try:
-            payload = {"otp": otp}
-            headers = get_crowstack_headers(cid)
-            resp = await client.post(
-                f"{CROWSTACK_BASE}/verify",
-                headers=headers,
-                json=payload,
-                timeout=15,
-            )
-            data = resp.json() if resp.status_code == 200 else {}
-            if data.get("ok"):
-                acc = data.get("account", {})
+        prof_key = session.get("profile", get_crowstack_profile_key(cid))
+        profiles_to_try = [prof_key]
+        alt = "main" if prof_key == "new" else "new"
+        profiles_to_try.append(alt)
 
-                # Call Crowstack Export File API right after account creation
-                try:
-                    exp_res = await crowstack_export_file(client, cid)
-                    if exp_res.get("ok"):
-                        exp_data = exp_res.get("data")
-                        if isinstance(exp_data, dict):
-                            for k, v in exp_data.items():
-                                if k not in acc or not acc[k]:
-                                    acc[k] = v
-                except Exception as exp_e:
-                    print(f"[Crowstack export_file error]: {exp_e}")
+        for p_k in profiles_to_try:
+            try:
+                p_info = CROWSTACK_PROFILES.get(p_k, CROWSTACK_PROFILES["new"])
+                headers = get_crowstack_headers(cid)
+                headers["User-Agent"] = p_info["user_agent"]
+                headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
+                headers["sec-ch-ua"] = p_info["sec_ch_ua"]
+                headers["sec-ch-ua-platform"] = p_info["sec_ch_ua_platform"]
 
-                xo = acc.get("xo", "")
-                ox = acc.get("ox", "")
-                return {
-                    "ok": True,
-                    "user_id": acc.get("user_id"),
-                    "phone": acc.get("mobile", phone),
-                    "account": acc,
-                    "xo": xo,
-                    "ox": ox,
-                    "bucket": acc.get("offer_bucket") or acc.get("bucket"),
-                    "is_new": True,
-                }
-            err = data.get("error") or data.get("message") or "Verification failed"
-            return {"ok": False, "error": f"Crowstack: {err}"}
-        except Exception as e:
-            return {"ok": False, "error": f"Crowstack verify error: {str(e)}"}
+                payload = {"otp": otp}
+                resp = await client.post(
+                    f"{CROWSTACK_BASE}/verify",
+                    headers=headers,
+                    json=payload,
+                    timeout=15,
+                )
+                data = resp.json() if resp.status_code == 200 else {}
+                if data.get("ok"):
+                    acc = data.get("account", {})
+
+                    # Call Crowstack Export File API right after account creation
+                    try:
+                        exp_res = await crowstack_export_file(client, cid)
+                        if exp_res.get("ok"):
+                            exp_data = exp_res.get("data")
+                            if isinstance(exp_data, dict):
+                                for k, v in exp_data.items():
+                                    if k not in acc or not acc[k]:
+                                        acc[k] = v
+                    except Exception as exp_e:
+                        print(f"[Crowstack export_file error]: {exp_e}")
+
+                    xo = acc.get("xo", "")
+                    ox = acc.get("ox", "")
+                    return {
+                        "ok": True,
+                        "user_id": acc.get("user_id"),
+                        "phone": acc.get("mobile", phone),
+                        "account": acc,
+                        "xo": xo,
+                        "ox": ox,
+                        "bucket": acc.get("offer_bucket") or acc.get("bucket"),
+                        "is_new": True,
+                    }
+                else:
+                    err = data.get("error") or data.get("message") or "Verification failed"
+                    print(f"[Crowstack verify rejected with {p_k}]: {err}")
+            except Exception as e:
+                print(f"[Crowstack verify error with {p_k}]: {e}")
+
+        return {"ok": False, "error": "Crowstack verify failed across both profiles."}
 
     # Method 2: Hidenfree
     if session.get("method") == "hidenfree":
@@ -2067,13 +2213,27 @@ async def build_keys_view_message_and_markup(client: httpx.AsyncClient, chat_id:
     if not keys:
         lines.append("❌ <b>Koi API Key add nahi hai.</b>\nNiche <b>➕ Add New Key</b> par click karein.")
     else:
-        lines.append(f"⚡ <b>Total Configured Keys:</b> <code>{len(keys)}</code>\n")
-        for idx, k in enumerate(keys, start=1):
-            bal = await otpd_balance(client, k)
+        bal_map = await fetch_all_key_balances(client, keys, max_concurrency=30)
+        total_bal = 0.0
+        for b in bal_map.values():
+            try:
+                total_bal += float(b)
+            except ValueError:
+                pass
+
+        lines.append(f"⚡ <b>Total Configured Keys:</b> <code>{len(keys)} Keys</code> (Parallel Workers)")
+        lines.append(f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n")
+
+        disp_limit = 8
+        for idx, k in enumerate(keys[:disp_limit], start=1):
+            bal = bal_map.get(k, "0.00")
             masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
             lines.append(f"• <b>Key #{idx}:</b> <code>{masked}</code> | Balance: <b>₹{bal}</b> (<code>Worker #{idx}</code>)")
-            if idx < len(keys):
-                await asyncio.sleep(0.3)
+
+        if len(keys) > disp_limit:
+            remaining = len(keys) - disp_limit
+            lines.append(f"\n<i>... aur {remaining} active keys configured hain.</i>")
+            lines.append("📁 <i>Sabhi keys export/backup ke liye <code>/backupkeys</code> bhejein.</i>")
 
     lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("👇 <i>Niche button dabakar actions choose karein:</i>")
@@ -2086,8 +2246,11 @@ async def build_keys_view_message_and_markup(client: httpx.AsyncClient, chat_id:
             ],
             [
                 {"text": "🔄 Refresh Balances", "callback_data": "refresh_keys"},
-                {"text": "🧹 Clear All Keys", "callback_data": "clear_keys_prompt"},
+                {"text": "📁 Backup Keys (.txt)", "callback_data": "backup_keys_action"},
             ],
+            [
+                {"text": "🧹 Clear All Keys", "callback_data": "clear_keys_prompt"},
+            ]
         ]
     }
     return "\n".join(lines), inline_kb
@@ -2247,13 +2410,13 @@ async def run_single_key_worker(
         await send_tg_message(client, chat_id, fresh_alert_msg)
 
         dev = mk_device()
-        otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id)
+        otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id, worker_id=worker_id, server=current_server)
         if not otp_res.get("ok"):
             err_str = otp_res.get("error", "Failed")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ OTP send failed: {err_str}. Queued cancel for refund...")
             cur_bal = await otpd_balance(client, api_key)
             await record_transaction("OTP_SEND_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_str)
-            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
@@ -2415,13 +2578,19 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
     state["worker_states"] = {}
     state["stop_flag"] = False
 
-    # Fetch balances for all keys and prepare workers
+    # Parallel balance fetch for fast instant startup (even with 300+ keys)
+    bal_map = await fetch_all_key_balances(client, keys, max_concurrency=30)
     key_lines = []
-    worker_tasks = []
+    total_bal = 0.0
     for idx, key in enumerate(keys, start=1):
-        bal = await otpd_balance(client, key)
+        bal = bal_map.get(key, "0.00")
+        try:
+            total_bal += float(bal)
+        except ValueError:
+            pass
         masked = key[:4] + "..." + key[-4:] if len(key) >= 8 else key
-        key_lines.append(f"• <b>Worker #{idx}:</b> <code>{masked}</code> (₹{bal})")
+        if idx <= 6:
+            key_lines.append(f"• <b>Worker #{idx}:</b> <code>{masked}</code> (₹{bal})")
         state["worker_states"][idx] = {
             "active_id": None,
             "attempts": 0,
@@ -2432,13 +2601,17 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
             "api_key": key,
         }
 
+    if len(keys) > 6:
+        key_lines.append(f"<i>... aur {len(keys)-6} workers background me ready hain.</i>")
+
     keys_str = "\n".join(key_lines)
     await send_tg_message(
         client,
         chat_id,
         f"🎯 <b>Multi-Key Concurrent Hunting Started!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>Active Concurrent Workers:</b> <b>{len(keys)} Workers</b>\n"
+        f"⚡ <b>Active Concurrent Workers:</b> <b>{len(keys)} Parallel Workers</b>\n"
+        f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
         f"🏷️ <b>Selected Servers (Max 2):</b> <code>{server_names}</code>\n"
         f"⚡ <b>Check Interval:</b> <code>1-2 Seconds (High Speed)</code>\n\n"
         f"🔑 <b>Configured API Keys:</b>\n{keys_str}\n"
@@ -2446,11 +2619,14 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
         f"<i>📊 Live stats ke liye <b>/stats</b>\n📋 Summary report ke liye <b>/summary</b>\n🛑 Rokne ke liye <b>/stop</b> dabayein.</i>",
     )
 
+    worker_tasks = []
     for idx, key in enumerate(keys, start=1):
         t = asyncio.create_task(
             run_single_key_worker(client, chat_id, idx, key, servers, state)
         )
         worker_tasks.append(t)
+        if idx % 10 == 0:
+            await asyncio.sleep(0.05)
 
     # Wait for all workers to finish
     if worker_tasks:
@@ -2461,13 +2637,16 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
     total_time_mins = int((time.time() - state.get("start_time", time.time())) // 60)
 
     # Final summary of workers
+    final_bal_map = await fetch_all_key_balances(client, keys, max_concurrency=30)
     final_worker_lines = []
-    for idx, key in enumerate(keys, start=1):
+    for idx, key in enumerate(keys[:8], start=1):
         w_st = state["worker_states"].get(idx, {})
-        w_bal = await otpd_balance(client, key)
+        w_bal = final_bal_map.get(key, "0.00")
         final_worker_lines.append(
             f"• <b>Worker #{idx} ({w_st.get('key_preview', '')}):</b> {w_st.get('attempts', 0)} attempts | {w_st.get('accounts', 0)} created | Bal: ₹{w_bal}"
         )
+    if len(keys) > 8:
+        final_worker_lines.append(f"<i>... aur {len(keys)-8} workers ki detail report /summary me dekhein.</i>")
     w_summary = "\n".join(final_worker_lines)
 
     await send_tg_message(
@@ -3063,6 +3242,44 @@ async def bot_loop():
                             await answer_tg_callback(client, cb_id, "🧹 Sabhi keys clear ho gayi!")
                             keys_text, keys_kb = await build_keys_view_message_and_markup(client, cb_chat_id)
                             await send_tg_message(client, cb_chat_id, keys_text, reply_markup=keys_kb)
+                            continue
+
+                        elif cb_data == "backup_keys_action":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            keys = get_user_api_keys(cb_chat_id)
+                            if not keys:
+                                await answer_tg_callback(client, cb_id, "⚠️ Koi keys configured nahi hain!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id, "📥 Backup file ban rahi hai...")
+                            txt_content = "\n".join(keys)
+                            await send_tg_document(
+                                client,
+                                cb_chat_id,
+                                filename=f"otpdoctor_keys_backup_{len(keys)}_keys.txt",
+                                content=txt_content,
+                                caption=f"🔐 <b>OTP Doctor Keys Backup:</b> <code>{len(keys)}</code> API keys exported.\n<i>(Direct backup file saved across server restarts)</i>",
+                            )
+                            continue
+
+                        # ── Crowstack Failover User Choice Callbacks ──
+                        elif cb_data.startswith("fb_gemix_"):
+                            phone = cb_data.replace("fb_gemix_", "").strip()
+                            fut = PENDING_OTP_FALLBACK_DECISIONS.get(phone)
+                            if fut and not fut.done():
+                                fut.set_result("gemix")
+                            await answer_tg_callback(client, cb_id, "🟢 GemixAI Fallback Chosen!")
+                            await send_tg_message(client, cb_chat_id, f"🟢 <b>GemixAI (₹200 OFF):</b> <code>+91{phone}</code> par ₹200 OFF reroll karke OTP send kiya jaa raha hai...")
+                            continue
+
+                        elif cb_data.startswith("fb_cancel_"):
+                            phone = cb_data.replace("fb_cancel_", "").strip()
+                            fut = PENDING_OTP_FALLBACK_DECISIONS.get(phone)
+                            if fut and not fut.done():
+                                fut.set_result("cancel")
+                            await answer_tg_callback(client, cb_id, "❌ Number Cancelled (Refunded)")
+                            await send_tg_message(client, cb_chat_id, f"❌ <b>Cancelled:</b> <code>+91{phone}</code> refund ke liye cancel kar diya gaya.")
                             continue
 
                         # ── Crowstack Identity & Session Profile Callbacks ──
@@ -3874,32 +4091,76 @@ async def bot_loop():
                             else:
                                 await send_tg_message(client, chat_id, f"❌ Order {oid} not found.")
 
-                    # ── 🔑 Multi-Key Management (/keys, /addkey, /delkey, /clearkeys, /setkey) ──
+                    # ── 🔑 Multi-Key Management (/keys, /addkey, /addkeys, /delkey, /clearkeys, /backupkeys) ──
                     elif text in ("🔑 Manage Keys", "🔑 Set API Key", "/keys", "/managekeys"):
                         keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
                         await send_tg_message(client, chat_id, keys_text, reply_markup=keys_kb)
 
+                    # ── Bulk Add Keys (/addkeys <key1> <key2> ... or /bulkkeys) ──
+                    elif text.startswith("/addkeys") or text.startswith("/bulkkeys") or text.startswith("/importkeys"):
+                        raw_payload = text.split(maxsplit=1)
+                        if len(raw_payload) == 2 and len(raw_payload[1].strip()) >= 8:
+                            raw_keys = re.findall(r"[a-zA-Z0-9_\-]{8,128}", raw_payload[1])
+                            if raw_keys:
+                                added = add_user_api_keys_bulk(chat_id, raw_keys)
+                                all_keys = get_user_api_keys(chat_id)
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"🎉 <b>Bulk Keys Import Complete!</b>\n\n"
+                                    f"✅ <b>Added / Updated:</b> {added} keys\n"
+                                    f"⚡ <b>Total Active Workers:</b> {len(all_keys)} keys\n\n"
+                                    f"<i>Keys persistent JSON & memory pool mein save ho gayi hain.</i>",
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                )
+                            else:
+                                await send_tg_message(client, chat_id, "❌ Valid API keys nahi mili format mein.")
+                        else:
+                            state["manual_step"] = "awaiting_bulk_keys"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "📥 <b>Bulk OTP Doctor API Keys Import:</b>\n\n"
+                                "Aap apni sabhi keys (1 se lekar 500+ tak) yahan text mein paste karein (newline, space ya comma separated) ya direct <code>.txt</code> file upload karein.\n\n"
+                                "Bot sabhi valid keys auto-detect karke parallel worker pool mein add kar dega.",
+                                reply_markup=cancel_markup,
+                            )
+
+                    # ── Single Add Key (/addkey <key>) ──
                     elif text.startswith("/addkey"):
                         parts = text.split(maxsplit=1)
                         if len(parts) == 2 and len(parts[1].strip()) >= 8:
                             cand_key = parts[1].strip()
-                            test_bal = await otpd_balance(client, cand_key)
-                            if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
-                                add_user_api_key(chat_id, cand_key)
+                            # Check if multiple keys passed into /addkey
+                            extracted = re.findall(r"[a-zA-Z0-9_\-]{8,128}", cand_key)
+                            if len(extracted) > 1:
+                                added = add_user_api_keys_bulk(chat_id, extracted)
                                 keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
                                 await send_tg_message(
                                     client,
                                     chat_id,
-                                    f"✅ <b>Naya API Key Successfully Add ho gaya!</b>\n💰 <b>Key Balance:</b> ₹{test_bal}\n\n{keys_text}",
+                                    f"🎉 <b>Bulk Keys Added!</b> ({added} keys)\n\n{keys_text}",
                                     reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                                 )
                             else:
-                                await send_tg_message(
-                                    client,
-                                    chat_id,
-                                    f"❌ <b>Invalid API Key!</b> OTP Doctor error: <code>{test_bal}</code>\nKripya sahi key bhejein.",
-                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
-                                )
+                                test_bal = await otpd_balance(client, cand_key)
+                                if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
+                                    add_user_api_key(chat_id, cand_key)
+                                    keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
+                                    await send_tg_message(
+                                        client,
+                                        chat_id,
+                                        f"✅ <b>Naya API Key Successfully Add ho gaya!</b>\n💰 <b>Key Balance:</b> ₹{test_bal}\n\n{keys_text}",
+                                        reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                    )
+                                else:
+                                    await send_tg_message(
+                                        client,
+                                        chat_id,
+                                        f"❌ <b>Invalid API Key!</b> OTP Doctor error: <code>{test_bal}</code>\nKripya sahi key bhejein.",
+                                        reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                    )
                         else:
                             state["manual_step"] = "awaiting_add_key"
                             cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
@@ -3908,6 +4169,21 @@ async def bot_loop():
                                 chat_id,
                                 "➕ <b>Naya OTP Doctor API Key bhejein:</b>\n<i>(OTP Doctor dashboard se copy karke yahan paste karein)</i>",
                                 reply_markup=cancel_markup,
+                            )
+
+                    # ── Backup Keys (/backupkeys, /exportkeys) ──
+                    elif text in ("/backupkeys", "/exportkeys", "📥 Backup Keys"):
+                        keys = get_user_api_keys(chat_id)
+                        if not keys:
+                            await send_tg_message(client, chat_id, "⚠️ Koi keys configured nahi hain!", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            txt_content = "\n".join(keys)
+                            await send_tg_document(
+                                client,
+                                chat_id,
+                                filename=f"otpdoctor_keys_backup_{len(keys)}_keys.txt",
+                                content=txt_content,
+                                caption=f"🔐 <b>OTP Doctor Keys Backup:</b> <code>{len(keys)}</code> API keys exported.\n<i>(Direct backup file saved across server restarts)</i>",
                             )
 
                     elif text.startswith("/delkey"):
@@ -3938,22 +4214,32 @@ async def bot_loop():
                         parts = text.split(maxsplit=1)
                         if len(parts) == 2 and len(parts[1].strip()) >= 8:
                             new_key = parts[1].strip()
-                            test_bal = await otpd_balance(client, new_key)
-                            if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
-                                add_user_api_key(chat_id, new_key)
+                            extracted = re.findall(r"[a-zA-Z0-9_\-]{8,128}", new_key)
+                            if len(extracted) > 1:
+                                added = add_user_api_keys_bulk(chat_id, extracted)
                                 await send_tg_message(
                                     client,
                                     chat_id,
-                                    f"✅ <b>API Key Successfully Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}",
+                                    f"✅ <b>Bulk API Keys Saved!</b> ({added} keys active)",
                                     reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                                 )
                             else:
-                                await send_tg_message(
-                                    client,
-                                    chat_id,
-                                    f"❌ <b>Invalid API Key!</b> OTP Doctor ne reject kiya: <code>{test_bal}</code>\nKripya sahi key bhejein.",
-                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
-                                )
+                                test_bal = await otpd_balance(client, new_key)
+                                if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
+                                    add_user_api_key(chat_id, new_key)
+                                    await send_tg_message(
+                                        client,
+                                        chat_id,
+                                        f"✅ <b>API Key Successfully Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}",
+                                        reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                    )
+                                else:
+                                    await send_tg_message(
+                                        client,
+                                        chat_id,
+                                        f"❌ <b>Invalid API Key!</b> OTP Doctor ne reject kiya: <code>{test_bal}</code>\nKripya sahi key bhejein.",
+                                        reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                    )
                         else:
                             state["manual_step"] = "awaiting_add_key"
                             cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
@@ -3964,25 +4250,77 @@ async def bot_loop():
                                 reply_markup=cancel_markup,
                             )
 
-                    elif state.get("manual_step") == "awaiting_add_key":
-                        candidate_key = text.strip()
-                        test_bal = await otpd_balance(client, candidate_key)
-                        if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
-                            add_user_api_key(chat_id, candidate_key)
+                    elif state.get("manual_step") in ("awaiting_add_key", "awaiting_bulk_keys"):
+                        content = text
+                        doc = msg.get("document")
+                        if doc and doc.get("file_id"):
+                            try:
+                                f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
+                                if f_res.status_code == 200:
+                                    f_path = f_res.json().get("result", {}).get("file_path")
+                                    if f_path:
+                                        dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
+                                        content = dl_res.text
+                            except Exception as e:
+                                print(f"[Keys File Import Error] {e}")
+
+                        cand_keys = re.findall(r"[a-zA-Z0-9_\-]{8,128}", content)
+                        if len(cand_keys) > 1:
+                            added = add_user_api_keys_bulk(chat_id, cand_keys)
                             state["manual_step"] = None
                             keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
                             await send_tg_message(
                                 client,
                                 chat_id,
-                                f"🎉 <b>API Key Verified & Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}\n\n{keys_text}",
+                                f"🎉 <b>Bulk Keys Verified & Imported!</b>\n⚡ <b>Added:</b> {added} Keys\n\n{keys_text}",
                                 reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                             )
+                        elif len(cand_keys) == 1:
+                            candidate_key = cand_keys[0]
+                            test_bal = await otpd_balance(client, candidate_key)
+                            if "ACCESS_BALANCE" in test_bal or test_bal.replace(".", "", 1).isdigit():
+                                add_user_api_key(chat_id, candidate_key)
+                                state["manual_step"] = None
+                                keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"🎉 <b>API Key Verified & Saved!</b>\n💰 <b>Wallet Balance:</b> ₹{test_bal}\n\n{keys_text}",
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                )
+                            else:
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"❌ <b>API Key Invalid!</b> Error: <code>{test_bal}</code>\nDobara sahi key bhejein ya /cancel karein.",
+                                )
                         else:
-                            await send_tg_message(
-                                client,
-                                chat_id,
-                                f"❌ <b>API Key Invalid!</b> Error: <code>{test_bal}</code>\nDobara sahi key bhejein ya /cancel karein.",
-                            )
+                            await send_tg_message(client, chat_id, "❌ Koi valid API keys detect nahi hui. Kripya valid key string paste karein.")
+
+                    # Auto-detect uploaded .txt document for API Keys import if sent directly
+                    elif msg.get("document") and msg["document"].get("file_name", "").endswith(".txt") and not state.get("hunting"):
+                        doc = msg.get("document")
+                        try:
+                            f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
+                            if f_res.status_code == 200:
+                                f_path = f_res.json().get("result", {}).get("file_path")
+                                if f_path:
+                                    dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
+                                    file_content = dl_res.text
+                                    extracted_keys = re.findall(r"[a-zA-Z0-9_\-]{8,128}", file_content)
+                                    if extracted_keys:
+                                        added = add_user_api_keys_bulk(chat_id, extracted_keys)
+                                        keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
+                                        await send_tg_message(
+                                            client,
+                                            chat_id,
+                                            f"📄 <b>Keys Text File Auto-Imported!</b>\n\n"
+                                            f"📥 <b>File:</b> <code>{doc.get('file_name')}</code>\n"
+                                            f"✅ <b>Loaded:</b> {added} keys\n\n{keys_text}",
+                                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                        )
+                        except Exception as doc_e:
+                            print(f"[Txt Doc Import Error] {doc_e}")
 
                     elif state.get("manual_step") == "awaiting_del_key":
                         del_target = text.strip()
@@ -4265,12 +4603,20 @@ async def bot_loop():
                         if state and state.get("hunting"):
                             runtime_mins = int((time.time() - state.get("start_time", time.time())) // 60)
                             worker_lines = []
-                            for idx, k in enumerate(keys, start=1):
+                            # Fetch balances in parallel at high speed
+                            balances_dict = await fetch_all_key_balances(client, keys, max_concurrency=25)
+                            total_bal = sum(balances_dict.values())
+                            
+                            max_disp = min(10, len(keys))
+                            for idx in range(1, max_disp + 1):
+                                k = keys[idx - 1]
                                 w_st = state.get("worker_states", {}).get(idx, {})
-                                w_bal = await otpd_balance(client, k)
+                                w_bal = balances_dict.get(k, 0.0)
                                 worker_lines.append(
-                                    f"• <b>Worker #{idx} ({w_st.get('key_preview', k[:4]+'...')})</b>: <code>{w_st.get('status', 'Running')}</code> | Att: {w_st.get('attempts', 0)} | Created: {w_st.get('accounts', 0)} | Bal: ₹{w_bal}"
+                                    f"• <b>Worker #{idx} ({k[:4]}...{k[-4:]})</b>: <code>{w_st.get('status', 'Running')}</code> | Att: {w_st.get('attempts', 0)} | Created: {w_st.get('accounts', 0)} | Bal: ₹{w_bal:.2f}"
                                 )
+                            if len(keys) > max_disp:
+                                worker_lines.append(f"• <i>... and {len(keys) - max_disp} more workers active</i>")
                             w_details = "\n".join(worker_lines) if worker_lines else "<i>No active workers</i>"
                             stats_text = (
                                 f"📊 <b>LIVE MULTI-KEY HUNTING STATS</b>\n"
@@ -4280,39 +4626,41 @@ async def bot_loop():
                                 f"🏷️ <b>Active Servers:</b> <code>{server_names}</code>\n"
                                 f"🔄 <b>Total Combined Attempts:</b> {state.get('attempts', 0)}\n"
                                 f"❌ <b>Registered Numbers Cancelled:</b> {state.get('registered_count', 0)}\n"
-                                f"🎉 <b>Total Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n\n"
+                                f"🎉 <b>Total Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
+                                f"💵 <b>Total Pool Wallet:</b> <b>₹{total_bal:.2f}</b>\n\n"
                                 f"⚡ <b>Per-Worker Live Performance:</b>\n{w_details}\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"<i>Full report ke liye <b>/summary</b> dabayein.</i>"
                             )
                         else:
+                            balances_dict = await fetch_all_key_balances(client, keys, max_concurrency=25)
+                            total_bal = sum(balances_dict.values())
                             key_balances = []
-                            total_bal = 0.0
-                            for idx, k in enumerate(keys, start=1):
-                                bal = await otpd_balance(client, k)
+                            max_disp = min(10, len(keys))
+                            for idx in range(1, max_disp + 1):
+                                k = keys[idx - 1]
+                                bal = balances_dict.get(k, 0.0)
                                 masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
-                                key_balances.append(f"• <b>Key #{idx} ({masked}):</b> ₹{bal}")
-                                try:
-                                    total_bal += float(bal)
-                                except ValueError:
-                                    pass
+                                key_balances.append(f"• <b>Key #{idx} ({masked}):</b> ₹{bal:.2f}")
+                            if len(keys) > max_disp:
+                                key_balances.append(f"• <i>... and {len(keys) - max_disp} more keys configured</i>")
                             k_bal_str = "\n".join(key_balances) if key_balances else "<i>No keys configured</i>"
                             stats_text = (
                                 f"📊 <b>BOT MASTER STATS</b>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"⚡ <b>Status:</b> ⚪ Idle (Not running)\n"
-                                f"🔑 <b>Configured Keys:</b> {len(keys)} Keys\n"
+                                f"🔑 <b>Configured Keys:</b> <b>{len(keys)} Keys</b>\n"
                                 f"🏷️ <b>Configured Servers:</b> <code>{server_names}</code>\n"
                                 f"🔄 <b>Last Session Attempts:</b> {state.get('attempts', 0) if state else 0}\n"
                                 f"🎉 <b>Last Session Created:</b> {state.get('accounts_created', 0) if state else 0}\n\n"
                                 f"💰 <b>Key Balances:</b>\n{k_bal_str}\n"
-                                f"💵 <b>Total Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
+                                f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"Start karne ke liye <b>🚀 Start Hunt</b> dabayein."
                             )
                         await send_tg_message(client, chat_id, stats_text)
 
-                    # ── 💰 Balance ──
+                    # ── 💰 Balance (High Speed Parallel Polling) ──
                     elif text.startswith("/balance") or text == "💰 Balance":
                         keys = get_user_api_keys(chat_id)
                         if not keys:
@@ -4324,18 +4672,25 @@ async def bot_loop():
                             )
                             continue
 
-                        lines = ["💰 <b>OTP DOCTOR BALANCES:</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━"]
-                        total_bal = 0.0
-                        for idx, key in enumerate(keys, start=1):
-                            bal = await otpd_balance(client, key)
+                        await send_tg_message(client, chat_id, f"⚡ <i>Fetching balances for {len(keys)} keys in parallel...</i>")
+                        balances_dict = await fetch_all_key_balances(client, keys, max_concurrency=25)
+                        total_bal = sum(balances_dict.values())
+                        
+                        lines = [
+                            f"💰 <b>OTP DOCTOR BALANCES ({len(keys)} KEYS):</b>",
+                            "━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        ]
+                        max_disp = min(12, len(keys))
+                        for idx in range(1, max_disp + 1):
+                            key = keys[idx - 1]
+                            bal = balances_dict.get(key, 0.0)
                             masked = key[:4] + "..." + key[-4:] if len(key) >= 8 else key
-                            lines.append(f"• <b>Key #{idx}</b> (<code>{masked}</code>): <b>₹{bal}</b> (<code>Worker #{idx}</code>)")
-                            try:
-                                total_bal += float(bal)
-                            except ValueError:
-                                pass
+                            lines.append(f"• <b>Key #{idx}</b> (<code>{masked}</code>): <b>₹{bal:.2f}</b> (<code>Worker #{idx}</code>)")
+                        if len(keys) > max_disp:
+                            lines.append(f"• <i>... and {len(keys) - max_disp} more keys in active pool</i>")
                         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
                         lines.append(f"💵 <b>Total Combined Balance:</b> <b>₹{total_bal:.2f}</b>")
+                        lines.append(f"🔐 Full keys export ke liye <code>/backupkeys</code> bhejein.")
                         await send_tg_message(client, chat_id, "\n".join(lines))
 
                     # ── 🛑 Stop Hunt ──
