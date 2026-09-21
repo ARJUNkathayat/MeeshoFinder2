@@ -1073,6 +1073,19 @@ async def otpd_balance(client: httpx.AsyncClient, api_key: str, force_refresh: b
     return "0.00"
 
 
+def parse_balance_float(val: any) -> float:
+    try:
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).replace("ACCESS_BALANCE:", "").strip()
+        m = re.search(r"[-+]?\d*\.?\d+", s)
+        if m:
+            return float(m.group(0))
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 async def fetch_all_key_balances(client: httpx.AsyncClient, keys: list[str], max_concurrency: int = 25) -> dict[str, str]:
     """Fetches balances for hundreds of keys concurrently using Semaphore without rate-limit delay."""
     sem = asyncio.Semaphore(max_concurrency)
@@ -1086,7 +1099,7 @@ async def fetch_all_key_balances(client: httpx.AsyncClient, keys: list[str], max
     res_map = {}
     for item in results:
         if isinstance(item, tuple) and len(item) == 2:
-            res_map[item[0]] = item[1]
+            res_map[item[0]] = str(item[1])
     return res_map
 
 
@@ -2538,7 +2551,7 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
         state = ACTIVE_TASKS.get(cid) or ACTIVE_TASKS.get(str(chat_id)) or {}
 
     balances_dict = await fetch_all_key_balances(client, keys, max_concurrency=25)
-    total_bal = sum(balances_dict.values())
+    total_bal = sum(parse_balance_float(v) for v in balances_dict.values())
 
     is_running = state.get("hunting", False)
     if is_running:
@@ -2548,7 +2561,7 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
         for idx in range(1, max_disp + 1):
             k = keys[idx - 1]
             w_st = state.get("worker_states", {}).get(idx, {})
-            w_bal = balances_dict.get(k, 0.0)
+            w_bal = parse_balance_float(balances_dict.get(k, "0.00"))
             worker_lines.append(
                 f"• <b>Worker #{idx} ({k[:4]}...{k[-4:]})</b>: <code>{w_st.get('status', 'Running')}</code> | Att: {w_st.get('attempts', 0)} | Created: {w_st.get('accounts', 0)} | Bal: ₹{w_bal:.2f}"
             )
@@ -2578,7 +2591,7 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
         max_disp = min(10, len(keys))
         for idx in range(1, max_disp + 1):
             k = keys[idx - 1]
-            bal = balances_dict.get(k, 0.0)
+            bal = parse_balance_float(balances_dict.get(k, "0.00"))
             masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
             key_balances.append(f"• <b>Key #{idx} ({masked}):</b> ₹{bal:.2f}")
         if len(keys) > max_disp:
@@ -5333,7 +5346,7 @@ async def bot_loop():
 
                         await send_tg_message(client, chat_id, f"⚡ <i>Fetching balances for {len(keys)} keys in parallel...</i>")
                         balances_dict = await fetch_all_key_balances(client, keys, max_concurrency=25)
-                        total_bal = sum(balances_dict.values())
+                        total_bal = sum(parse_balance_float(v) for v in balances_dict.values())
                         
                         lines = [
                             f"💰 <b>OTP DOCTOR BALANCES ({len(keys)} KEYS):</b>",
@@ -5342,7 +5355,7 @@ async def bot_loop():
                         max_disp = min(12, len(keys))
                         for idx in range(1, max_disp + 1):
                             key = keys[idx - 1]
-                            bal = balances_dict.get(key, 0.0)
+                            bal = parse_balance_float(balances_dict.get(key, "0.00"))
                             masked = key[:4] + "..." + key[-4:] if len(key) >= 8 else key
                             lines.append(f"• <b>Key #{idx}</b> (<code>{masked}</code>): <b>₹{bal:.2f}</b> (<code>Worker #{idx}</code>)")
                         if len(keys) > max_disp:
