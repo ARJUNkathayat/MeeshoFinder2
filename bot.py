@@ -197,6 +197,37 @@ GEMIXAI_HEADERS = {
     "sec-ch-ua-platform": '"Windows"',
 }
 
+# ─── Cupponhub APIs (New Primary Signup / Check API) ─────────────────────────
+CUPPONHUB_BASE = "https://cupponhub.shop/meesho/api"
+CUPPONHUB_HEADERS = {
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "cache-control": "no-cache",
+    "content-type": "application/json",
+    "origin": "https://cupponhub.shop",
+    "pragma": "no-cache",
+    "priority": "u=1, i",
+    "referer": "https://cupponhub.shop/meesho/",
+    "sec-ch-ua": '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-storage-access": "active",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    "x-tg-init-data": (
+        "query_id=AAEVN7JtAwAAABU3sm3gVF_u&user=%7B%22id%22%3A8282846997%2C"
+        "%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C"
+        "%22username%22%3A%22MarinKitagwa12%22%2C%22language_code%22%3A%22en%22%2C"
+        "%22allows_write_to_pm%22%3Atrue%2C"
+        "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
+        "%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D"
+        "&auth_date=1790004685&signature=1OCyjJ069TjCyH3uzCGGtMD3_Si8ciNELX2DhGRjiNSMCS6_IDf63rhFe6MC3ZPuyEDjQ9TPW7F70nuE1bMADw"
+        "&hash=20f2817adf3381cb9d3cac0b825f0941e660e0d9551d354bcead591cd706cb50"
+    ),
+}
+
 # ─── Web Registration Checker APIs ────────────────────────────────────────────
 CHECKER_PRIMARY = "https://pricetrackerpro.fojadomain.fun/api/check"
 CHECKER_FALLBACK = "https://promeesho.eu.cc/api/check"
@@ -1164,8 +1195,114 @@ async def otpd_get_sms(client: httpx.AsyncClient, api_key: str, act_id: str) -> 
         return {"ok": False, "waiting": False, "error": str(e)}
 
 
+# ─── Cupponhub Core API Functions ─────────────────────────────────────────────
+async def cupponhub_check_phone(client: httpx.AsyncClient, phone: str) -> dict:
+    """Checks registration on Meesho via Cupponhub phone/check endpoint."""
+    try:
+        resp = await client.post(
+            f"{CUPPONHUB_BASE}/phone/check",
+            headers=CUPPONHUB_HEADERS,
+            json={"mobile": phone},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            d = resp.json() or {}
+            st = str(d.get("status", "")).lower()
+            if st == "old":
+                return {"ok": True, "registered": True, "fresh": False, "source": "cupponhub", "message": d.get("message", "")}
+            elif st in ("new", "fresh", "unregistered", "ok") or (st and st != "old"):
+                return {"ok": True, "registered": False, "fresh": True, "source": "cupponhub"}
+    except Exception as e:
+        print(f"[Cupponhub Phone Check Error] {e}")
+    return {"ok": False, "registered": None, "fresh": None, "error": "Cupponhub check failed"}
+
+
+async def cupponhub_send_otp(client: httpx.AsyncClient, phone: str, tier: int = 200, chat_id: int | str = None) -> dict:
+    """Dispatches Meesho OTP via Cupponhub login/check API with configurable discount tier."""
+    try:
+        payload = {"mobile": str(phone), "tier": int(tier)}
+        resp = await client.post(
+            f"{CUPPONHUB_BASE}/login/check",
+            headers=CUPPONHUB_HEADERS,
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            status = data.get("status", "")
+            if status == "otp_sent":
+                sess_id = data.get("session_id") or f"8282846997_{phone}"
+                return {
+                    "ok": True,
+                    "method": "cupponhub",
+                    "session_id": sess_id,
+                    "bucket": data.get("bucket", tier),
+                    "tier": tier,
+                    "session": {
+                        "method": "cupponhub",
+                        "phone": phone,
+                        "session_id": sess_id,
+                        "tier": tier,
+                        "chat_id": chat_id,
+                    },
+                }
+            else:
+                err_msg = data.get("message") or data.get("error") or str(data)
+                return {"ok": False, "error": f"Cupponhub: {err_msg}"}
+        else:
+            return {"ok": False, "error": f"Cupponhub HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"ok": False, "error": f"Cupponhub exception: {e}"}
+
+
+async def cupponhub_verify_otp(client: httpx.AsyncClient, session_id: str, otp: str, phone: str = "") -> dict:
+    """Verifies Meesho OTP via Cupponhub login/verify API."""
+    try:
+        payload = {"session_id": str(session_id), "otp": str(otp)}
+        resp = await client.post(
+            f"{CUPPONHUB_BASE}/login/verify",
+            headers=CUPPONHUB_HEADERS,
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            if data.get("status") == "success":
+                uid = data.get("user_id") or data.get("account_id")
+                return {
+                    "ok": True,
+                    "user_id": str(uid),
+                    "phone": str(data.get("mobile") or phone),
+                    "account": data,
+                    "bucket": data.get("bucket", 0),
+                    "is_new": data.get("new", True),
+                }
+            else:
+                err = data.get("message") or data.get("error") or str(data)
+                return {"ok": False, "error": f"Cupponhub verify: {err}"}
+        else:
+            return {"ok": False, "error": f"Cupponhub verify HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"ok": False, "error": f"Cupponhub verify exception: {e}"}
+
+
 # ─── Web Registration Checker ─────────────────────────────────────────────────
 async def check_meesho_reg(client: httpx.AsyncClient, phone: str) -> dict:
+    # 1. First priority: Cupponhub phone check endpoint
+    try:
+        cup_chk = await cupponhub_check_phone(client, phone)
+        if cup_chk.get("ok"):
+            return {
+                "registered": cup_chk.get("registered", False),
+                "fresh": cup_chk.get("fresh", False),
+                "ok": True,
+                "error": None,
+                "source": "cupponhub",
+            }
+    except Exception as e:
+        print(f"[Checker Cupponhub Exception]: {e}")
+
+    # 2. Standard Web Checker APIs
     payload = {"number": phone}
     last_err = ""
     for url, hdr in [(CHECKER_PRIMARY, CHECKER_HEADERS_1), (CHECKER_FALLBACK, CHECKER_HEADERS_2)]:
@@ -1189,7 +1326,7 @@ async def check_meesho_reg(client: httpx.AsyncClient, phone: str) -> dict:
             last_err = str(e)
             continue
 
-    # 2. Third Fallback: Hidenfree check-phone API
+    # 3. Third Fallback: Hidenfree check-phone API
     try:
         r_hf = await client.post(f"{HIDENFREE_BASE}/login/check-phone", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=10)
         if r_hf.status_code == 200:
@@ -1419,12 +1556,115 @@ async def request_otp_fallback_decision(client: httpx.AsyncClient, chat_id: int 
         PENDING_OTP_FALLBACK_DECISIONS.pop(phone, None)
 
 
-async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None, worker_id: int = 1, server: str = "") -> dict:
-    """Dispatches OTP using Smart Auto-Failover: Crowstack Primary (Rem/Marin) -> Crowstack Alternate -> GemixAI (Prompted/Reroll)."""
-    cur_ref = get_referral_link()
-    cur_prof = get_crowstack_profile_key(chat_id)
+async def _send_gemixai_otp_flow(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None) -> dict:
+    """Executes GemixAI OTP send with ₹200 OFF offer reroll."""
+    try:
+        print(f"[GemixAI] Executing GemixAI API for +91{phone} (rerolling for ₹200 OFF)...")
+        offer_bucket = 0
+        for rr_try in range(1, 25):
+            try:
+                rr_resp = await client.post(f"{GEMIXAI_BASE}/reroll", headers=GEMIXAI_HEADERS, timeout=8)
+                if rr_resp.status_code == 200:
+                    rr_data = rr_resp.json() or {}
+                    offer = rr_data.get("offer") or {}
+                    b = offer.get("bucket") or offer.get("max_offer_value") or 0
+                    if b >= 200:
+                        offer_bucket = b
+                        print(f"[GemixAI] Found ₹{offer_bucket} OFF offer on try #{rr_try}!")
+                        break
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
 
-    # Ordered list of Crowstack profiles to try
+        if not offer_bucket:
+            offer_bucket = 200
+
+        if chat_id:
+            await send_tg_message(
+                client,
+                chat_id,
+                f"🎯 <b>GemixAI: ₹{offer_bucket} OFF Offer Mil Gaya!</b>\n📤 Ab <code>+91{phone}</code> par OTP bhej rahe hain...",
+            )
+
+        otp_payload = {"phone": phone}
+        otp_resp = await client.post(
+            f"{GEMIXAI_BASE}/auth/otp",
+            headers=GEMIXAI_HEADERS,
+            json=otp_payload,
+            timeout=15,
+        )
+        if otp_resp.status_code == 200:
+            otp_data = otp_resp.json() or {}
+            if otp_data.get("success"):
+                return {
+                    "ok": True,
+                    "method": "gemixai",
+                    "registered": False,
+                    "bucket": offer_bucket,
+                    "session": {
+                        "method": "gemixai",
+                        "phone": phone,
+                        "bucket": offer_bucket,
+                        "instance_id": dev["instance_id"],
+                        "chat_id": chat_id,
+                    },
+                }
+            else:
+                return {"ok": False, "error": f"GemixAI rejected: {otp_data}"}
+    except Exception as e:
+        return {"ok": False, "error": f"GemixAI error: {str(e)}"}
+    return {"ok": False, "error": "GemixAI flow failed"}
+
+
+async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None, worker_id: int = 1, server: str = "") -> dict:
+    """Dispatches OTP using selected Engine: Cupponhub, Crowstack (Rem/Marin), GemixAI, Hidenfree, or Auto-Failover."""
+    cfg = get_user_config(chat_id) if chat_id else {}
+    engine = cfg.get("api_engine", "cupponhub")
+    tier = int(cfg.get("cupponhub_tier", 200))
+    cur_ref = get_referral_link()
+
+    # ── 1. Cupponhub Direct Engine ──
+    if engine == "cupponhub":
+        cup_res = await cupponhub_send_otp(client, phone, tier=tier, chat_id=chat_id)
+        if cup_res.get("ok"):
+            print(f"[{time.strftime('%H:%M:%S')}] [Cupponhub] ✅ OTP sent via Cupponhub (Tier: ₹{tier}) to +91{phone}!")
+            return cup_res
+        else:
+            print(f"[Cupponhub failed for +91{phone}]: {cup_res.get('error')}")
+            return cup_res
+
+    # ── 2. GemixAI Direct Engine ──
+    if engine == "gemixai":
+        return await _send_gemixai_otp_flow(client, phone, dev, chat_id)
+
+    # ── 3. Hidenfree Direct Engine ──
+    if engine == "hidenfree":
+        try:
+            hf_res = await client.post(f"{HIDENFREE_BASE}/login/send-otp", headers=HIDENFREE_HEADERS, json={"phone": phone, "referral_link": cur_ref}, timeout=15)
+            if hf_res.status_code == 200:
+                hf_data = hf_res.json() or {}
+                if hf_data.get("ok"):
+                    return {
+                        "ok": True,
+                        "method": "hidenfree",
+                        "registered": False,
+                        "bucket": hf_data.get("offer_bucket", 200),
+                        "session": {"method": "hidenfree", "phone": phone, "instance_id": dev["instance_id"], "chat_id": chat_id},
+                    }
+        except Exception as e:
+            print(f"[Hidenfree send-otp error]: {e}")
+        return {"ok": False, "error": "Hidenfree send-otp failed"}
+
+    # ── 4. Auto-Failover: Cupponhub ➔ Crowstack ➔ GemixAI ──
+    if engine == "auto":
+        cup_res = await cupponhub_send_otp(client, phone, tier=tier, chat_id=chat_id)
+        if cup_res.get("ok"):
+            print(f"[{time.strftime('%H:%M:%S')}] [Auto-Failover] ✅ OTP sent via Cupponhub (Tier: ₹{tier}) to +91{phone}!")
+            return cup_res
+        print(f"[Auto-Failover] Cupponhub failed ({cup_res.get('error')}). Auto-falling back to Crowstack...")
+
+    # ── Crowstack (Rem & Marin session failover) ──
+    cur_prof = get_crowstack_profile_key(chat_id)
     profiles_to_try = [cur_prof]
     if cur_prof == "new":
         profiles_to_try.append("main")
@@ -1444,7 +1684,7 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
             headers["User-Agent"] = p_info["user_agent"]
             headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
             headers["sec-ch-ua"] = p_info["sec_ch_ua"]
-            headers["sec-ch-ua-platform"] = p_info["sec_ch_ua_platform"]
+            headers["sec-ch-ua-platform"] = p_info["sec_ch_ua-platform"]
 
             payload = {"phone": phone, "ref_link": cur_ref, "force": True}
             resp = await client.post(
@@ -1483,80 +1723,27 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
 
     print(f"[Crowstack Failover] All Crowstack sessions failed for +91{phone}: {crowstack_errors}")
 
-    # If both Crowstack sessions failed -> Ask user via Telegram or auto-cancel on timeout
-    if chat_id:
+    if chat_id and engine == "auto":
         user_choice = await request_otp_fallback_decision(client, chat_id, phone, worker_id, server)
         if user_choice != "gemix":
             return {"ok": False, "error": f"Crowstack Rem & Marin failed ({'; '.join(crowstack_errors)}) & user chose to cancel."}
+        return await _send_gemixai_otp_flow(client, phone, dev, chat_id)
 
-    # Execute GemixAI Fallback (with ₹200 OFF Reroll)
-    try:
-        print(f"[Fallback] Executing GemixAI API for +91{phone} (rerolling for ₹200 OFF)...")
-        offer_bucket = 0
-        for rr_try in range(1, 25):
-            try:
-                rr_resp = await client.post(f"{GEMIXAI_BASE}/reroll", headers=GEMIXAI_HEADERS, timeout=8)
-                if rr_resp.status_code == 200:
-                    rr_data = rr_resp.json() or {}
-                    offer = rr_data.get("offer") or {}
-                    b = offer.get("bucket") or offer.get("max_offer_value") or 0
-                    if b >= 200:
-                        offer_bucket = b
-                        print(f"[GemixAI] Found ₹{offer_bucket} OFF offer on try #{rr_try}!")
-                        break
-            except Exception:
-                pass
-            await asyncio.sleep(0.3)
-
-        if not offer_bucket:
-            offer_bucket = 200
-
-        if chat_id:
-            await send_tg_message(
-                client,
-                chat_id,
-                f"🎯 <b>GemixAI: ₹{offer_bucket} OFF Offer Mil Gaya!</b>\n📤 Ab <code>+91{phone}</code> par OTP bhej rahe hain...",
-            )
-
-        # Send OTP via GemixAI
-        otp_payload = {"phone": phone}
-        otp_resp = await client.post(
-            f"{GEMIXAI_BASE}/auth/otp",
-            headers=GEMIXAI_HEADERS,
-            json=otp_payload,
-            timeout=15,
-        )
-        if otp_resp.status_code == 200:
-            otp_data = otp_resp.json() or {}
-            if otp_data.get("success"):
-                return {
-                    "ok": True,
-                    "method": "gemixai",
-                    "registered": False,
-                    "bucket": offer_bucket,
-                    "session": {
-                        "method": "gemixai",
-                        "phone": phone,
-                        "bucket": offer_bucket,
-                        "instance_id": dev["instance_id"],
-                        "chat_id": chat_id,
-                    },
-                }
-            else:
-                print(f"[GemixAI send-otp rejected]: {otp_data}")
-                return {"ok": False, "error": f"GemixAI rejected: {otp_data}"}
-    except Exception as e:
-        print(f"[GemixAI send-otp error]: {e}")
-        return {"ok": False, "error": f"GemixAI error: {str(e)}"}
-
-    return {"ok": False, "error": "All OTP dispatch methods failed"}
+    return {"ok": False, "error": f"All OTP dispatch methods failed ({'; '.join(crowstack_errors)})"}
 
 
 async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict, chat_id: int | str = None) -> dict:
-    """Verifies OTP via Crowstack (Rem/Marin auto-failover), Hidenfree, GemixAI, or fallback to OTPLESS."""
+    """Verifies OTP via Cupponhub, Crowstack (Rem/Marin auto-failover), Hidenfree, GemixAI, or fallback to OTPLESS."""
+    method = session.get("method")
     cid = chat_id or session.get("chat_id")
-    # Method 1: Crowstack
-    if session.get("method") == "crowstack":
+
+    # Method 1: Cupponhub
+    if method == "cupponhub":
+        sess_id = session.get("session_id") or f"8282846997_{phone}"
+        return await cupponhub_verify_otp(client, sess_id, otp, phone=phone)
+
+    # Method 2: Crowstack
+    if method == "crowstack":
         prof_key = session.get("profile", get_crowstack_profile_key(cid))
         profiles_to_try = [prof_key]
         alt = "main" if prof_key == "new" else "new"
@@ -2469,6 +2656,75 @@ def build_identity_settings_message_and_markup(chat_id: int | str):
     return "\n".join(lines), kb
 
 
+def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
+    """Builds the API Engine, Tier & Target Limit configuration menu."""
+    cfg = get_user_config(chat_id)
+    cur_engine = cfg.get("api_engine", "cupponhub")
+    cur_tier = int(cfg.get("cupponhub_tier", 200))
+    cur_limit = int(cfg.get("target_limit", 0))
+
+    engine_names = {
+        "cupponhub": f"🛍️ Cupponhub (Tier: ₹{cur_tier} OFF)",
+        "crowstack": "🦅 Crowstack (Rem/Marin Failover)",
+        "gemixai": "⚡ GemixAI (₹200 Reroll)",
+        "hidenfree": "📦 Hidenfree",
+        "auto": f"🔄 Auto-Failover (Cupponhub ₹{cur_tier} ➔ Crowstack ➔ GemixAI)",
+    }
+    cur_engine_label = engine_names.get(cur_engine, cur_engine)
+    limit_label = f"🎯 <b>Max {cur_limit} Accounts (Auto-Stop)</b>" if cur_limit > 0 else "♾️ <b>Unlimited (Continuous Hunt)</b>"
+
+    lines = [
+        "⚡ <b>MEESHO BOT — API ENGINE & TARGET CONFIG</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"⚙️ <b>Active Account Creator Engine:</b>\n👉 <code>{cur_engine_label}</code>\n",
+        f"🏷️ <b>Cupponhub Offer Tier:</b> <b>₹{cur_tier} OFF</b>",
+        f"🎯 <b>Configured Target Limit:</b> {limit_label}\n",
+        "💡 <i>Aap choose kar sakte hain:</i>\n"
+        "• <b>API Engine:</b> Cupponhub, Crowstack, GemixAI ya Auto-Failover\n"
+        "• <b>Tier:</b> ₹200 OFF ya ₹180 OFF\n"
+        "• <b>Target Limit:</b> Kitne accounts banakar bot auto-stop kare (in-flight accounts finish karke safe exit)\n",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "👇 <b>Niche diye gaye buttons se turant customize karein:</b>",
+    ]
+
+    b_cup = "✅ " if cur_engine == "cupponhub" else ""
+    b_crow = "✅ " if cur_engine == "crowstack" else ""
+    b_gem = "✅ " if cur_engine == "gemixai" else ""
+    b_hid = "✅ " if cur_engine == "hidenfree" else ""
+    b_auto = "✅ " if cur_engine == "auto" else ""
+
+    b_t200 = "✅ " if cur_tier == 200 else ""
+    b_t180 = "✅ " if cur_tier == 180 else ""
+
+    kb = {
+        "inline_keyboard": [
+            [
+                {"text": f"{b_cup}🛍️ Cupponhub API", "callback_data": "set_engine_cupponhub"},
+                {"text": f"{b_crow}🦅 Crowstack API", "callback_data": "set_engine_crowstack"},
+            ],
+            [
+                {"text": f"{b_gem}⚡ GemixAI API", "callback_data": "set_engine_gemixai"},
+                {"text": f"{b_hid}📦 Hidenfree", "callback_data": "set_engine_hidenfree"},
+            ],
+            [
+                {"text": f"{b_auto}🔄 Auto-Failover (Smart)", "callback_data": "set_engine_auto"},
+            ],
+            [
+                {"text": f"{b_t200}🎁 Tier: ₹200 OFF", "callback_data": "set_tier_200"},
+                {"text": f"{b_t180}🎁 Tier: ₹180 OFF", "callback_data": "set_tier_180"},
+            ],
+            [
+                {"text": f"🎯 Target Limit: {cur_limit if cur_limit > 0 else 'Unlimited'}", "callback_data": "set_limit_prompt"},
+                {"text": "🚀 Launch Hunt", "callback_data": "launch_hunt_action"},
+            ],
+            [
+                {"text": "🔙 Back to Store Settings", "callback_data": "open_settings_menu"},
+            ]
+        ]
+    }
+    return "\n".join(lines), kb
+
+
 # ─── Multi-Key Concurrent Worker Engine ───────────────────────────────────────
 async def run_single_key_worker(
     client: httpx.AsyncClient,
@@ -2486,6 +2742,12 @@ async def run_single_key_worker(
     print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Started with Key: {key_preview} on servers: {servers}")
 
     while state.get("hunting") and not state.get("stop_flag"):
+        # Check target limit before buying a new number
+        target_limit = state.get("target_limit", 0)
+        if target_limit > 0 and state.get("accounts_created", 0) >= target_limit:
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🎯 Target limit of {target_limit} reached! Worker not buying new numbers.")
+            break
+
         current_server = servers[server_idx % len(servers)]
         server_idx += 1
 
@@ -2628,7 +2890,7 @@ async def run_single_key_worker(
             await asyncio.sleep(1.0)
             continue
 
-        # Verify OTP & Login to Meesho
+        # Verify OTP & Login to Meesho (Complete in-flight account even if target reached)
         print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🔐 Verifying OTP {otp_code} for {phone}...")
         login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev, chat_id=chat_id)
 
@@ -2672,6 +2934,9 @@ async def run_single_key_worker(
             sync_res = sync_to_sell_store(account_data, phone)
             store_tag = f"\n🛒 <b>Auto-Stocked in Sell Bot:</b> ✅ Live (Total Stock: {sync_res.get('stock', 1)})" if sync_res.get("ok") else ""
 
+            target_limit = state.get("target_limit", 0)
+            target_info = f" | 🎯 Target: <b>{state['accounts_created']}/{target_limit}</b>" if target_limit > 0 else ""
+
             account_msg = (
                 f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
                 f"🎉 <b>MEESHO ACCOUNT CREATED SUCCESSFULLY!</b>\n"
@@ -2681,7 +2946,7 @@ async def run_single_key_worker(
                 f"👤 <b>Meesho User ID:</b> <code>{user_id}</code>\n"
                 f"⚡ <b>Mined By:</b> <code>Worker #{worker_id}</code> (Key: <code>{key_preview}</code>)\n"
                 f"🏷️ <b>Server:</b> <code>Server {current_server}</code>\n"
-                f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime Total: <b>#{lifetime_total}</b>{store_tag}\n\n"
+                f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime: <b>#{lifetime_total}</b>{target_info}{store_tag}\n\n"
                 f"📋 <b>Account JSON Data:</b>\n"
                 f"<pre><code>{json_str}</code></pre>\n"
                 f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
@@ -2696,6 +2961,11 @@ async def run_single_key_worker(
                 content=json_str,
                 caption=f"✅ Meesho Account (+91{phone}) — Aaj Ka #{today_count} JSON | Worker #{worker_id}",
             )
+
+            # Check if target reached
+            if target_limit > 0 and state.get("accounts_created", 0) >= target_limit:
+                state["target_reached"] = True
+                print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🎯 Target limit ({target_limit}) reached! Signalling safe exit.")
 
             w_state["active_id"] = None
         else:
@@ -2718,7 +2988,7 @@ async def run_single_key_worker(
 
 
 # ─── Dual Server Multi-Key Hunter Task ────────────────────────────────────────
-async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
+async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, target_limit: int = None):
     state = ACTIVE_TASKS.get(chat_id)
     if not state or not state["hunting"]:
         return
@@ -2745,12 +3015,29 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
     servers = servers[:2]
     server_names = ", ".join(f"Server {s}" for s in servers)
 
+    if target_limit is None:
+        target_limit = int(cfg.get("target_limit", 0))
+
+    state["target_limit"] = target_limit
+    state["target_reached"] = False
     state["attempts"] = 0
     state["registered_count"] = 0
     state["accounts_created"] = 0
     state["start_time"] = time.time()
     state["worker_states"] = {}
     state["stop_flag"] = False
+
+    engine = cfg.get("api_engine", "cupponhub")
+    tier = int(cfg.get("cupponhub_tier", 200))
+    engine_names = {
+        "cupponhub": f"🛍️ Cupponhub (Tier: ₹{tier} OFF)",
+        "crowstack": "🦅 Crowstack (Rem/Marin Failover)",
+        "gemixai": "⚡ GemixAI (₹200 Reroll)",
+        "hidenfree": "📦 Hidenfree",
+        "auto": f"🔄 Auto-Failover (Cupponhub ₹{tier} ➔ Crowstack ➔ GemixAI)",
+    }
+    engine_label = engine_names.get(engine, engine)
+    limit_label = f"🎯 <b>Target Limit:</b> <b>{target_limit} Accounts (Auto-Stop)</b>\n" if target_limit > 0 else "🎯 <b>Target Limit:</b> ♾️ Continuous Unlimited\n"
 
     # Parallel balance fetch for fast instant startup (even with 300+ keys)
     bal_map = await fetch_all_key_balances(client, keys, max_concurrency=30)
@@ -2784,13 +3071,14 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
         chat_id,
         f"🎯 <b>Multi-Key Concurrent Hunting Started!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ <b>Creator Engine:</b> <code>{engine_label}</code>\n"
+        f"{limit_label}"
         f"⚡ <b>Active Concurrent Workers:</b> <b>{len(keys)} Parallel Workers</b>\n"
         f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
-        f"🏷️ <b>Selected Servers (Max 2):</b> <code>{server_names}</code>\n"
-        f"⚡ <b>Check Interval:</b> <code>1-2 Seconds (High Speed)</code>\n\n"
+        f"🏷️ <b>Selected Servers:</b> <code>{server_names}</code>\n\n"
         f"🔑 <b>Configured API Keys:</b>\n{keys_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>📊 Live stats ke liye <b>/stats</b>\n📋 Summary report ke liye <b>/summary</b>\n🛑 Rokne ke liye <b>/stop</b> dabayein.</i>",
+        f"<i>📊 Live stats: <b>/stats</b> | 📋 Summary: <b>/summary</b> | 🛑 Stop: <b>/stop</b></i>",
     )
 
     worker_tasks = []
@@ -2823,11 +3111,19 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str):
         final_worker_lines.append(f"<i>... aur {len(keys)-8} workers ki detail report /summary me dekhein.</i>")
     w_summary = "\n".join(final_worker_lines)
 
+    if state.get("target_reached"):
+        banner_title = f"🎯 <b>TARGET LIMIT REACHED ({state.get('accounts_created', 0)} / {target_limit})!</b>"
+        banner_sub = f"🎉 <b>Target ke anusaar {state.get('accounts_created', 0)} accounts successfully create ho gaye aur bot safely stop ho gaya.</b>\n"
+    else:
+        banner_title = "🏁 <b>Hunting Session Stopped!</b>"
+        banner_sub = ""
+
     await send_tg_message(
         client,
         chat_id,
-        f"🏁 <b>Hunting Session Stopped!</b>\n"
+        f"{banner_title}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{banner_sub}"
         f"⏱️ <b>Total Runtime:</b> {total_time_mins} minutes\n"
         f"🔄 <b>Total Combined Attempts:</b> {state.get('attempts', 0)}\n"
         f"❌ <b>Registered Cancelled:</b> {state.get('registered_count', 0)}\n"
@@ -3546,19 +3842,29 @@ async def bot_loop():
                             cur_name = get_store_upi_name()
                             prof_key = get_crowstack_profile_key(cb_chat_id)
                             prof_name = CROWSTACK_PROFILES.get(prof_key, CROWSTACK_PROFILES["new"])["name"]
+                            cfg = get_user_config(cb_chat_id)
+                            cur_eng = cfg.get("api_engine", "cupponhub")
+                            cur_tier = int(cfg.get("cupponhub_tier", 200))
+                            cur_lim = int(cfg.get("target_limit", 0))
+                            lim_str = f"{cur_lim} Accs" if cur_lim > 0 else "Unlimited"
+
                             settings_text = (
                                 f"⚙️ <b>MEESHO STORE & BOT SETTINGS</b>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"👤 <b>Active Crowstack Session:</b> <code>{prof_name}</code>\n"
+                                f"⚡ <b>Creator Engine:</b> <code>{cur_eng.upper()} (₹{cur_tier} OFF)</code>\n"
+                                f"🎯 <b>Target Limit:</b> <b>{lim_str}</b>\n"
+                                f"👤 <b>Crowstack Session:</b> <code>{prof_name}</code>\n"
                                 f"💰 <b>Meesho JSON Price:</b> <b>₹{cur_p}</b>\n"
-                                f"📲 <b>UPI ID:</b> <code>{cur_upi}</code>\n"
-                                f"👤 <b>Payee Name:</b> <b>{cur_name}</b>\n"
+                                f"📲 <b>UPI ID:</b> <code>{cur_upi}</code> (<b>{cur_name}</b>)\n"
                                 f"🔗 <b>Referral Link:</b>\n<code>{cur_ref}</code>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"👇 <i>Niche button dabakar koi bhi setting turant update karein:</i>"
                             )
                             settings_kb = {
                                 "inline_keyboard": [
+                                    [
+                                        {"text": "⚡ API Engine & Target Limit", "callback_data": "open_engine_menu"},
+                                    ],
                                     [
                                         {"text": "👤 Crowstack Session / Identity", "callback_data": "open_identity_menu"},
                                     ],
@@ -3572,6 +3878,76 @@ async def bot_loop():
                                 ]
                             }
                             await send_tg_message(client, cb_chat_id, settings_text, reply_markup=settings_kb)
+                            continue
+
+                        elif cb_data == "open_engine_menu":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id)
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(cb_chat_id)
+                            await send_tg_message(client, cb_chat_id, eng_text, reply_markup=eng_kb)
+                            continue
+
+                        elif cb_data.startswith("set_engine_"):
+                            eng_choice = cb_data.replace("set_engine_", "").strip()
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            update_user_config(cb_chat_id, {"api_engine": eng_choice})
+                            await answer_tg_callback(client, cb_id, f"✅ Engine set to {eng_choice.upper()}!")
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(cb_chat_id)
+                            await send_tg_message(client, cb_chat_id, eng_text, reply_markup=eng_kb)
+                            continue
+
+                        elif cb_data.startswith("set_tier_"):
+                            tier_choice = int(cb_data.replace("set_tier_", "").strip())
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            update_user_config(cb_chat_id, {"cupponhub_tier": tier_choice})
+                            await answer_tg_callback(client, cb_id, f"✅ Cupponhub Tier: ₹{tier_choice} OFF!")
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(cb_chat_id)
+                            await send_tg_message(client, cb_chat_id, eng_text, reply_markup=eng_kb)
+                            continue
+
+                        elif cb_data == "set_limit_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_target_limit"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                "🎯 <b>Target Account Limit Set Karein:</b>\n\n"
+                                "Kitne accounts banakar bot ko auto-stop karna hai?\n"
+                                "👉 Number type karke bhejein (jaise: <code>3</code> ya <code>5</code> ya <code>0</code> for unlimited):\n\n"
+                                "<i>(Note: In-flight ban rahe accounts safe finish hoke stop honge)</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        elif cb_data == "launch_hunt_action":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {"hunting": False, "active_id": None, "stop_flag": False})
+                            if st.get("hunting"):
+                                await answer_tg_callback(client, cb_id, "⚠️ Hunting already running!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id, "🚀 Launching Hunt...")
+                            cfg_cb = get_user_config(cb_chat_id)
+                            sel_servers = cfg_cb.get("selected_servers", ["5841"])
+                            if not sel_servers:
+                                sel_servers = ["5841"]
+                                update_user_config(cb_chat_id, {"selected_servers": sel_servers})
+                            st["hunting"] = True
+                            st["active_id"] = None
+                            st["stop_flag"] = False
+                            asyncio.create_task(run_multi_hunter_task(client, cb_chat_id))
                             continue
 
                         elif cb_data == "set_profile_new":
@@ -4790,8 +5166,80 @@ async def bot_loop():
                         else:
                             await send_tg_message(client, chat_id, "❌ Kripya sirf numeric Server ID bhejein (jaise: <code>5841</code>).")
 
+                    # ── ⚡ Creator Engine Menu & Commands ──
+                    elif text in ("⚡ Creator Engine", "⚡ API Engine", "/engine", "/engines", "/setengine"):
+                        eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                        await send_tg_message(client, chat_id, eng_text, reply_markup=eng_kb)
+
+                    elif text.startswith("/setengine ") or text.startswith("/engine "):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2:
+                            val = parts[1].strip().lower()
+                            if val in ("cupponhub", "crowstack", "gemixai", "hidenfree", "auto"):
+                                update_user_config(chat_id, {"api_engine": val})
+                                eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                                await send_tg_message(client, chat_id, f"✅ <b>API Engine set to {val.upper()}!</b>\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                            else:
+                                await send_tg_message(client, chat_id, "⚠️ Options: <code>cupponhub</code>, <code>crowstack</code>, <code>gemixai</code>, <code>hidenfree</code>, <code>auto</code>")
+
+                    # ── 🎁 Tier Selection (/settier 200, /settier 180, /tier) ──
+                    elif text.startswith("/settier") or text.startswith("/tier"):
+                        parts = text.split()
+                        if len(parts) == 2 and parts[1] in ("200", "180"):
+                            t_val = int(parts[1])
+                            update_user_config(chat_id, {"cupponhub_tier": t_val})
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                            await send_tg_message(client, chat_id, f"✅ <b>Cupponhub Tier set to ₹{t_val} OFF!</b>\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/settier 200</code> ya <code>/settier 180</code>")
+
+                    # ── 🎯 Target Limit Commands (/setlimit <n>, /limit <n>, /target <n>) ──
+                    elif text.startswith("/setlimit") or text.startswith("/limit") or text.startswith("/target") or text in ("🎯 Target Limit", "🎯 Set Target"):
+                        parts = text.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            lim_val = int(parts[1])
+                            update_user_config(chat_id, {"target_limit": lim_val})
+                            state["target_limit"] = lim_val
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                            lim_msg = f"🎯 <b>Target Limit set to {lim_val} Accounts!</b>" if lim_val > 0 else "♾️ <b>Target Limit: Unlimited</b>"
+                            await send_tg_message(client, chat_id, f"{lim_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            state["manual_step"] = "awaiting_target_limit"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            cur_lim = int(cfg.get("target_limit", 0))
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🎯 <b>Target Account Limit Set Karein:</b>\n\n"
+                                f"<b>Current Target:</b> {cur_lim if cur_lim > 0 else 'Unlimited'}\n\n"
+                                f"Kitne accounts banakar bot ko stop hona chahiye?\n"
+                                f"👉 Number type karke bhejein (jaise: <code>3</code> ya <code>5</code> ya <code>0</code> for unlimited):\n\n"
+                                f"<i>(In-flight ban rahe accounts safe finish hoke stop honge)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_target_limit":
+                        clean_val = text.strip()
+                        if clean_val.isdigit():
+                            lim_val = int(clean_val)
+                            update_user_config(chat_id, {"target_limit": lim_val})
+                            state["target_limit"] = lim_val
+                            state["manual_step"] = None
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                            lim_msg = f"🎯 <b>Target Limit set to {lim_val} Accounts!</b> (Bot will safely finish in-flight accounts and stop)" if lim_val > 0 else "♾️ <b>Target Limit removed!</b> (Continuous hunt mode)"
+                            await send_tg_message(client, chat_id, f"{lim_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            await send_tg_message(client, chat_id, "❌ Kripya valid number bhejein (jaise: <code>3</code> ya <code>0</code> for unlimited).")
+
                     # ── 🚀 Start Hunt ──
                     elif text.startswith("/hunt") or text == "🚀 Start Hunt":
+                        parts = text.split()
+                        hunt_limit = None
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            hunt_limit = int(parts[1])
+                            update_user_config(chat_id, {"target_limit": hunt_limit})
+                            state["target_limit"] = hunt_limit
+
                         if state.get("hunting"):
                             await send_tg_message(client, chat_id, "⚠️ Hunting already chal rahi hai! Live stats ke liye <b>/stats</b> dabayein.")
                         else:
@@ -4802,7 +5250,7 @@ async def bot_loop():
                             state["hunting"] = True
                             state["active_id"] = None
                             state["stop_flag"] = False
-                            asyncio.create_task(run_multi_hunter_task(client, chat_id))
+                            asyncio.create_task(run_multi_hunter_task(client, chat_id, target_limit=hunt_limit))
 
                     # ── 📱 Check My Number ──
                     elif text.startswith("/check") or text == "📱 Check My Number":
