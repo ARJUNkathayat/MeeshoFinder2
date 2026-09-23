@@ -1710,7 +1710,7 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
             headers["User-Agent"] = p_info["user_agent"]
             headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
             headers["sec-ch-ua"] = p_info["sec_ch_ua"]
-            headers["sec-ch-ua-platform"] = p_info["sec_ch_ua-platform"]
+            headers["sec-ch-ua-platform"] = p_info.get("sec_ch_ua_platform", '"Windows"')
 
             payload = {"phone": phone, "ref_link": cur_ref, "force": True}
             resp = await client.post(
@@ -1825,7 +1825,7 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                 headers["User-Agent"] = p_info["user_agent"]
                 headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
                 headers["sec-ch-ua"] = p_info["sec_ch_ua"]
-                headers["sec-ch-ua-platform"] = p_info["sec_ch_ua-platform"]
+                headers["sec-ch-ua-platform"] = p_info.get("sec_ch_ua_platform", '"Windows"')
 
                 if cid:
                     await send_tg_message(
