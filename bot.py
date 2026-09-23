@@ -1633,7 +1633,7 @@ async def _send_gemixai_otp_flow(client: httpx.AsyncClient, phone: str, dev: dic
 async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None, worker_id: int = 1, server: str = "") -> dict:
     """Dispatches OTP using selected Engine: Cupponhub, Crowstack (Rem/Marin), GemixAI, Hidenfree, or Auto-Failover."""
     cfg = get_user_config(chat_id) if chat_id else {}
-    engine = cfg.get("api_engine", "cupponhub")
+    engine = cfg.get("api_engine", "crowstack")
     tier = int(cfg.get("cupponhub_tier", 200))
     cur_ref = get_referral_link()
 
@@ -1694,6 +1694,18 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
             prof_name = p_info["name"]
             print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] Trying {prof_name} for +91{phone}...")
 
+            if chat_id:
+                await send_tg_message(
+                    client,
+                    chat_id,
+                    f"📤 <b>[Crowstack Call] send-otp</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📱 <b>Number:</b> <code>+91{phone}</code>\n"
+                    f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
+                    f"🔗 <b>Ref Link:</b> <code>{cur_ref or 'None'}</code>\n"
+                    f"⏳ <i>Sending request to Crowstack...</i>",
+                )
+
             headers = get_crowstack_headers(chat_id)
             headers["User-Agent"] = p_info["user_agent"]
             headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
@@ -1707,35 +1719,77 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
                 json=payload,
                 timeout=15,
             )
-            if resp.status_code == 200:
-                data = resp.json() or {}
-                if data.get("ok"):
-                    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] ✅ OTP sent successfully using {prof_name}!")
-                    return {
-                        "ok": True,
+            raw_text = resp.text.strip()
+            data = None
+            try:
+                data = resp.json()
+            except Exception:
+                pass
+
+            if resp.status_code == 200 and data and data.get("ok"):
+                print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] ✅ OTP sent successfully using {prof_name}!")
+                if chat_id:
+                    resp_preview = json.dumps(data, indent=2)[:600]
+                    await send_tg_message(
+                        client,
+                        chat_id,
+                        f"✅ <b>[Crowstack Response] send-otp SUCCESS!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📊 <b>HTTP Status:</b> <code>{resp.status_code}</code>\n"
+                        f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
+                        f"📥 <b>Response Body:</b>\n<pre><code>{resp_preview}</code></pre>\n"
+                        f"⏳ <i>Ab OTP Doctor se SMS aane ka wait kiya jaa raha hai...</i>",
+                    )
+                return {
+                    "ok": True,
+                    "method": "crowstack",
+                    "profile": prof_key,
+                    "registered": data.get("registered"),
+                    "bucket": data.get("bucket"),
+                    "session": {
                         "method": "crowstack",
                         "profile": prof_key,
-                        "registered": data.get("registered"),
-                        "bucket": data.get("bucket"),
-                        "session": {
-                            "method": "crowstack",
-                            "profile": prof_key,
-                            "phone": phone,
-                            "instance_id": dev["instance_id"],
-                            "chat_id": chat_id,
-                        },
-                    }
-                else:
-                    err_msg = data.get("error") or data.get("message") or str(data)
-                    crowstack_errors.append(f"{prof_name}: {err_msg}")
-                    print(f"[Crowstack {prof_name} rejected]: {err_msg}")
+                        "phone": phone,
+                        "instance_id": dev["instance_id"],
+                        "chat_id": chat_id,
+                    },
+                }
             else:
-                crowstack_errors.append(f"{prof_name}: HTTP {resp.status_code}")
+                err_msg = (data.get("error") or data.get("message") or raw_text) if data else raw_text
+                crowstack_errors.append(f"{prof_name}: {err_msg} (HTTP {resp.status_code})")
+                print(f"[Crowstack {prof_name} rejected]: {err_msg}")
+                if chat_id:
+                    err_preview = raw_text[:800] if raw_text else f"HTTP {resp.status_code}"
+                    await send_tg_message(
+                        client,
+                        chat_id,
+                        f"⚠️ <b>[Crowstack Response] send-otp REJECTED!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📊 <b>HTTP Status:</b> <code>{resp.status_code}</code>\n"
+                        f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
+                        f"❌ <b>Server Response:</b>\n<pre><code>{err_preview}</code></pre>",
+                    )
         except Exception as e:
             crowstack_errors.append(f"{prof_name}: {e}")
             print(f"[Crowstack {prof_key} error]: {e}")
+            if chat_id:
+                await send_tg_message(
+                    client,
+                    chat_id,
+                    f"🚨 <b>[Crowstack Network Exception]</b>\n"
+                    f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
+                    f"⚠️ <code>{e}</code>",
+                )
 
     print(f"[Crowstack Failover] All Crowstack sessions failed for +91{phone}: {crowstack_errors}")
+    if chat_id:
+        await send_tg_message(
+            client,
+            chat_id,
+            f"❌ <b>[Crowstack Failover] All Sessions Failed for +91{phone}!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Session Errors:</b>\n<code>{chr(10).join(crowstack_errors)}</code>",
+        )
 
     if chat_id and engine == "auto":
         user_choice = await request_otp_fallback_decision(client, chat_id, phone, worker_id, server)
@@ -1766,11 +1820,24 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
         for p_k in profiles_to_try:
             try:
                 p_info = CROWSTACK_PROFILES.get(p_k, CROWSTACK_PROFILES["new"])
+                prof_name = p_info["name"]
                 headers = get_crowstack_headers(cid)
                 headers["User-Agent"] = p_info["user_agent"]
                 headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
                 headers["sec-ch-ua"] = p_info["sec_ch_ua"]
-                headers["sec-ch-ua-platform"] = p_info["sec_ch_ua_platform"]
+                headers["sec-ch-ua-platform"] = p_info["sec_ch_ua-platform"]
+
+                if cid:
+                    await send_tg_message(
+                        client,
+                        cid,
+                        f"🔐 <b>[Crowstack Call] verify</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
+                        f"🔢 <b>OTP Code:</b> <code>{otp}</code>\n"
+                        f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
+                        f"⏳ <i>Verifying login on Crowstack...</i>",
+                    )
 
                 payload = {"otp": otp}
                 resp = await client.post(
@@ -1779,21 +1846,48 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                     json=payload,
                     timeout=15,
                 )
-                data = resp.json() if resp.status_code == 200 else {}
-                if data.get("ok"):
+                raw_text = resp.text.strip()
+                data = None
+                try:
+                    data = resp.json()
+                except Exception:
+                    pass
+
+                if resp.status_code == 200 and data and data.get("ok"):
                     acc = data.get("account", {})
+                    if cid:
+                        resp_preview = json.dumps(data, indent=2)[:600]
+                        await send_tg_message(
+                            client,
+                            cid,
+                            f"✅ <b>[Crowstack Response] verify SUCCESS!</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📊 <b>HTTP Status:</b> <code>{resp.status_code}</code>\n"
+                            f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
+                            f"📥 <b>Account Details:</b>\n<pre><code>{resp_preview}</code></pre>",
+                        )
 
                     # Call Crowstack Export File API right after account creation
                     try:
+                        if cid:
+                            await send_tg_message(client, cid, f"📁 <b>[Crowstack Call] export_file</b> (fetching session tokens & JSON)...")
                         exp_res = await crowstack_export_file(client, cid)
                         if exp_res.get("ok"):
                             exp_data = exp_res.get("data")
+                            if cid:
+                                exp_preview = json.dumps(exp_data, indent=2)[:400] if isinstance(exp_data, dict) else str(exp_res.get("text", ""))[:400]
+                                await send_tg_message(client, cid, f"✅ <b>[Crowstack Response] export_file SUCCESS!</b>\n<pre><code>{exp_preview}</code></pre>")
                             if isinstance(exp_data, dict):
                                 for k, v in exp_data.items():
                                     if k not in acc or not acc[k]:
                                         acc[k] = v
+                        else:
+                            if cid:
+                                await send_tg_message(client, cid, f"⚠️ <b>[Crowstack Response] export_file non-200:</b>\n<code>{exp_res}</code>")
                     except Exception as exp_e:
                         print(f"[Crowstack export_file error]: {exp_e}")
+                        if cid:
+                            await send_tg_message(client, cid, f"⚠️ <b>[Crowstack export_file exception]:</b> <code>{exp_e}</code>")
 
                     xo = acc.get("xo", "")
                     ox = acc.get("ox", "")
@@ -1808,11 +1902,26 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                         "is_new": True,
                     }
                 else:
-                    err = data.get("error") or data.get("message") or "Verification failed"
+                    err = (data.get("error") or data.get("message") or raw_text) if data else raw_text
                     print(f"[Crowstack verify rejected with {p_k}]: {err}")
+                    if cid:
+                        err_preview = raw_text[:800] if raw_text else f"HTTP {resp.status_code}"
+                        await send_tg_message(
+                            client,
+                            cid,
+                            f"❌ <b>[Crowstack Response] verify REJECTED!</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📊 <b>HTTP Status:</b> <code>{resp.status_code}</code>\n"
+                            f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
+                            f"⚠️ <b>Server Response:</b>\n<pre><code>{err_preview}</code></pre>",
+                        )
             except Exception as e:
                 print(f"[Crowstack verify error with {p_k}]: {e}")
+                if cid:
+                    await send_tg_message(client, cid, f"🚨 <b>[Crowstack Verify Exception]:</b> <code>{e}</code>")
 
+        if cid:
+            await send_tg_message(client, cid, f"❌ <b>[Crowstack Verify] Both Rem & Marin sessions failed for +91{phone}!</b>")
         return {"ok": False, "error": "Crowstack verify failed across both profiles."}
 
     # Method 2: Hidenfree
@@ -2673,7 +2782,7 @@ def build_identity_settings_message_and_markup(chat_id: int | str):
 def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
     """Builds the API Engine, Tier & Target Limit configuration menu."""
     cfg = get_user_config(chat_id)
-    cur_engine = cfg.get("api_engine", "cupponhub")
+    cur_engine = cfg.get("api_engine", "crowstack")
     cur_tier = int(cfg.get("cupponhub_tier", 200))
     cur_limit = int(cfg.get("target_limit", 0))
 
@@ -2866,6 +2975,14 @@ async def run_single_key_worker(
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ OTP send failed: {err_str}. Queued cancel for refund...")
             cur_bal = await otpd_balance(client, api_key)
             await record_transaction("OTP_SEND_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_str)
+            await send_tg_message(
+                client,
+                chat_id,
+                f"❌ <b>[OTP Dispatch Failed]</b>\n"
+                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id})\n"
+                f"⚠️ <b>Error:</b> <code>{err_str}</code>\n"
+                f"🔄 Number cancel & refund queued.",
+            )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
@@ -2892,6 +3009,16 @@ async def run_single_key_worker(
                 if digits:
                     otp_code = digits[0]
                     print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🔑 Extracted OTP: {otp_code}")
+                    await send_tg_message(
+                        client,
+                        chat_id,
+                        f"🔑 <b>[OTP Doctor SMS Aaya!]</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id})\n"
+                        f"🔢 <b>OTP:</b> <code>{otp_code}</code>\n"
+                        f"📩 <b>SMS:</b> <code>{sms_text}</code>\n"
+                        f"⚡ <i>Ab Crowstack login verify call ki jaa rahi hai...</i>",
+                    )
                     break
             await asyncio.sleep(2)
 
@@ -2899,6 +3026,13 @@ async def run_single_key_worker(
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone} (2 mins elapsed). Sending cancel request...")
             cur_bal = await otpd_balance(client, api_key)
             await record_transaction("SMS_TIMEOUT_CANCEL", phone, worker_id, current_server, cur_bal, "2-min Timeout")
+            await send_tg_message(
+                client,
+                chat_id,
+                f"⏰ <b>[SMS Timeout (2 Mins Elapsed)]</b>\n"
+                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id})\n"
+                f"⚠️ OTP Doctor se koi SMS nahi aaya. Number cancel & refund queued.",
+            )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
@@ -2987,6 +3121,15 @@ async def run_single_key_worker(
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Meesho login failed: {err_msg}. Queued cancel...")
             cur_bal = await otpd_balance(client, api_key)
             await record_transaction("LOGIN_FAILED_CANCEL", phone, worker_id, current_server, cur_bal, err_msg)
+            await send_tg_message(
+                client,
+                chat_id,
+                f"❌ <b>[Account Creation Failed]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id})\n"
+                f"⚠️ <b>Reason:</b> <code>{err_msg}</code>\n"
+                f"🔄 Number cancel & refund ho gaya.",
+            )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
 
@@ -3041,7 +3184,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
     state["worker_states"] = {}
     state["stop_flag"] = False
 
-    engine = cfg.get("api_engine", "cupponhub")
+    engine = cfg.get("api_engine", "crowstack")
     tier = int(cfg.get("cupponhub_tier", 200))
     engine_names = {
         "cupponhub": f"🛍️ Cupponhub (Tier: ₹{tier} OFF)",
@@ -3857,7 +4000,7 @@ async def bot_loop():
                             prof_key = get_crowstack_profile_key(cb_chat_id)
                             prof_name = CROWSTACK_PROFILES.get(prof_key, CROWSTACK_PROFILES["new"])["name"]
                             cfg = get_user_config(cb_chat_id)
-                            cur_eng = cfg.get("api_engine", "cupponhub")
+                            cur_eng = cfg.get("api_engine", "crowstack")
                             cur_tier = int(cfg.get("cupponhub_tier", 200))
                             cur_lim = int(cfg.get("target_limit", 0))
                             lim_str = f"{cur_lim} Accs" if cur_lim > 0 else "Unlimited"
