@@ -89,18 +89,19 @@ CROWSTACK_PROFILES = {
         "name": "Main Session (Marin #8282846997 - Chrome)",
         "user_id": "8282846997",
         "user_name": "Marin",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"',
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
         "sec_ch_ua_mobile": "?0",
         "sec_ch_ua_platform": '"Windows"',
         "x_tg_init_data": (
-            "query_id=AAEVN7JtAwAAABU3sm2aUBhR&user=%7B%22id%22%3A8282846997%2C"
+            "query_id=AAEVN7JtAwAAABU3sm34Ixx9&user=%7B%22id%22%3A8282846997%2C"
             "%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C"
-            "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
+            "%22username%22%3A%22MarinKitagwa12%22%2C%22language_code%22%3A%22en%22%2C"
+            "%22allows_write_to_pm%22%3Atrue%2C"
             "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
             "%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D"
-            "&auth_date=1788610401&signature=k4mneTgLJIWH33XG-nBIs8kE-cNIsE70RKNacz3NZc80zbLpoq0BRRoTuEDZNCMX6Dy1p48Kxu6Jw_CajHMRAw"
-            "&hash=54fb10c6a40b2b5fd9002abcc44d5871328080319f4f168796a053e7599ffcf5"
+            "&auth_date=1790153685&signature=A6CBDLO7stjYuzin8d7xqwtvE_ASH4xcqnnwG6uYEY5zIItb7YmJEXRIG47kf3Jkpp4lgYjKNn_qv4EQF3f1BA"
+            "&hash=a1a56dd3657bbccd6d9b4d51fc86fda1611be4329b9a4a3751b3f0dd2b05a9ad"
         ),
     },
 }
