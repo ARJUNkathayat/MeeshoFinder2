@@ -70,18 +70,18 @@ CROWSTACK_PROFILES = {
         "name": "New Session (Rem #8912242607 - Edge)",
         "user_id": "8912242607",
         "user_name": "Rem",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0",
-        "sec_ch_ua": '"Microsoft Edge";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0",
+        "sec_ch_ua": '"Chromium";v="154", "Microsoft Edge";v="154", "Not A(Brand";v="99"',
         "sec_ch_ua_mobile": "?0",
         "sec_ch_ua_platform": '"Windows"',
         "x_tg_init_data": (
-            "query_id=AAGvBzYTBAAAAK8HNhP7Dhtm&user=%7B%22id%22%3A8912242607%2C"
+            "query_id=AAGvBzYTBAAAAK8HNhOpbRYS&user=%7B%22id%22%3A8912242607%2C"
             "%22first_name%22%3A%22Rem%22%2C%22last_name%22%3A%22%22%2C"
             "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
             "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
             "%2FCzB6ff0QnWjL-1jduLteUDGtPQ_2cw5UV_KgdSt69fDwah01TLx2_AIcKiFqxJey.svg%22%7D"
-            "&auth_date=1789637334&signature=0f4IiovJUmSCMjQO_cieFIvNaZwEgdrDuKycxBvmGFIZ5earGhSLWEq5yBN3fv_8JWofx-m3-PijQdsZ3-p-Bg"
-            "&hash=a62c0ca85e8c3745a9f0f1812930baf75af7f263fb114404e7976f8f4d0d9305"
+            "&auth_date=1790828158&signature=4koLOhqgREiXLHh2DNV78Y5Zq6eI-j1xXk2Aahr8k_NCrG1muMYQMqbJWbkXGPEx2vB2wOw5MF3vSinjGuyaDA"
+            "&hash=e60b39a2423ae534148660905902fb62b524c22d553db4ce2275115e15f72e20"
         ),
     },
     "main": {
@@ -300,7 +300,8 @@ ORDERS_DB_FILE = "orders_db.json"
 ACTIVE_TASKS = {}
 
 DEFAULT_STORE_SETTINGS = {
-    "meesho_price": int(os.getenv("MEESHO_PRICE", "99")),
+    "meesho_price": int(os.getenv("MEESHO_PRICE", "20")),
+    "referral_price": int(os.getenv("REFERRAL_PRICE", "25")),
     "upi_id": os.getenv("UPI_ID", "paytmqr28100505010115i3puxb4eoa@paytm").strip(),
     "upi_name": os.getenv("UPI_NAME", "Meesho JSON Store").strip(),
     "admin_username": os.getenv("ADMIN_USERNAME", "shivamthakur01").strip().lstrip("@"),
@@ -798,12 +799,22 @@ def save_store_settings(settings: dict):
 
 
 def get_store_price() -> int:
-    return int(load_store_settings().get("meesho_price", 99))
+    return int(load_store_settings().get("meesho_price", 20))
 
 
 def update_store_price(new_price: int):
     st = load_store_settings()
     st["meesho_price"] = int(new_price)
+    save_store_settings(st)
+
+
+def get_store_referral_price() -> int:
+    return int(load_store_settings().get("referral_price", 25))
+
+
+def update_store_referral_price(new_price: int):
+    st = load_store_settings()
+    st["referral_price"] = int(new_price)
     save_store_settings(st)
 
 
@@ -2305,6 +2316,7 @@ KNOWN_MENU_BUTTONS = {
     "📝 Set JSON Format",
     "🔄 Convert JSON",
     "⚙️ Store Settings",
+    "👥 Paid Users / Orders",
     "📦 View Orders",
     "💰 Balance",
     "🛑 Stop Hunt",
@@ -2327,7 +2339,7 @@ ADMIN_MAIN_MENU_KEYBOARD = {
         [{"text": "⚙️ Select Servers"}, {"text": "🔑 Manage Keys"}],
         [{"text": "📋 Accounts Summary"}, {"text": "📊 Stats"}],
         [{"text": "📝 Set JSON Format"}, {"text": "🔄 Convert JSON"}],
-        [{"text": "⚙️ Store Settings"}, {"text": "📦 View Orders"}],
+        [{"text": "⚙️ Store Settings"}, {"text": "👥 Paid Users / Orders"}],
         [{"text": "💰 Balance"}, {"text": "🛑 Stop Hunt"}],
     ],
     "resize_keyboard": True,
@@ -2343,6 +2355,189 @@ USER_MAIN_MENU_KEYBOARD = {
 }
 
 MAIN_MENU_KEYBOARD = ADMIN_MAIN_MENU_KEYBOARD
+
+
+# ─── Admin Paid Users Queue & Order Delivery Helpers ──────────────────────────
+def build_paid_orders_view_message_and_markup() -> tuple[str, dict]:
+    all_ords = load_orders()
+    if not all_ords:
+        return "ℹ️ Koi orders nahi mile.", {"inline_keyboard": []}
+
+    pending_appr = [o for o in all_ords.values() if o.get("status") == "PENDING_APPROVAL"]
+    paid_approved = [o for o in all_ords.values() if o.get("status") in ("PAID_APPROVED", "PROCESSING", "READY_FOR_DELIVERY")]
+    completed = [o for o in all_ords.values() if o.get("status") == "COMPLETED"]
+
+    lines = [
+        "👥 <b>MEESHO PAID USERS & ORDER QUEUE</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+    kb_rows = []
+
+    if paid_approved:
+        lines.append(f"🟢 <b>PAID & READY FOR DELIVERY ({len(paid_approved)}):</b>")
+        for o in sorted(paid_approved, key=lambda x: x.get("created_at", 0), reverse=True)[:10]:
+            oid = o.get("id")
+            uid = o.get("user_id")
+            uname = o.get("username") or o.get("first_name") or uid
+            ref_tag = " (Custom Link)" if o.get("custom_referral_link") else ""
+            lines.append(
+                f"• <b>#{oid}</b> | User: <code>{uid}</code> (@{uname})\n"
+                f"  Amt: ₹{o.get('amount')}{ref_tag} | UTR: <code>{o.get('utr') or 'N/A'}</code>\n"
+                f"  Status: <b>{o.get('status')}</b>"
+                + (f"\n  🔗 Refer: <code>{o.get('custom_referral_link')}</code>" if o.get("custom_referral_link") else "")
+            )
+            btn_label = f"📤 Deliver to @{uname} (#{oid})"[:36]
+            kb_rows.append([{"text": btn_label, "callback_data": f"deliver_custom_{oid}"}])
+        lines.append("┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
+
+    if pending_appr:
+        lines.append(f"🟡 <b>UTR SUBMITTED (PENDING APPROVAL) ({len(pending_appr)}):</b>")
+        for o in sorted(pending_appr, key=lambda x: x.get("created_at", 0), reverse=True)[:5]:
+            oid = o.get("id")
+            uid = o.get("user_id")
+            uname = o.get("username") or uid
+            lines.append(
+                f"• <b>#{oid}</b> | @{uname} | ₹{o.get('amount')} | UTR: <code>{o.get('utr')}</code>"
+            )
+            kb_rows.append([
+                {"text": f"✅ Approve #{oid}", "callback_data": f"approve_ord_{oid}"},
+                {"text": f"📁 Deliver #{oid}", "callback_data": f"deliver_custom_{oid}"},
+            ])
+        lines.append("┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
+
+    if completed:
+        lines.append(f"✅ <b>RECENT DELIVERIES ({len(completed)} total):</b>")
+        for o in sorted(completed, key=lambda x: x.get("delivered_at", 0), reverse=True)[:4]:
+            lines.append(f"• <b>#{o.get('id')}</b> | +91{o.get('delivered_phone') or 'N/A'} | ₹{o.get('amount')} | Done ✅")
+
+    if not pending_appr and not paid_approved and not completed:
+        lines.append("ℹ️ Abhi koi active paid orders nahi hain.")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("👉 <i>Kisi bhi user ko JSON deliver karne ke liye unke naam ke button par click karein ya command <code>/deliver &lt;order_id&gt;</code> use karein.</i>")
+
+    kb_rows.append([{"text": "🔄 Refresh List", "callback_data": "view_paid_users"}])
+    return "\n".join(lines), {"inline_keyboard": kb_rows}
+
+
+async def deliver_json_with_simulation(
+    client: httpx.AsyncClient,
+    buyer_id: str,
+    order_id: str,
+    content: str,
+    file_bytes: bytes | None = None,
+    filename: str = "meesho_account.json",
+    phone_hint: str = None,
+    admin_notify_id: str | int | None = None,
+):
+    try:
+        phone = phone_hint
+        if not phone and content:
+            m = re.search(r'"(?:phone|mobile|phoneNumber|number)"\s*:\s*"?(?:91)?([6-9]\d{9})"?', content)
+            if m:
+                phone = m.group(1)
+        if not phone:
+            m = re.search(r'\b[6-9]\d{9}\b', content or "")
+            if m:
+                phone = m.group(0)
+        if not phone:
+            phone = str(random.randint(6200000000, 9999999999))
+
+        masked_phone = f"{phone[:3]}XXXX{phone[-3:]}"
+
+        # ── Step 1: Searching Fresh Number Simulation ──
+        await send_tg_message(
+            client,
+            buyer_id,
+            f"🔍 <b>[Step 1/4] Fresh Unregistered Number Search Shuru...</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+            f"⚡ Server 5841 par 100% fresh unregistered Indian number scan ho raha hai...\n"
+            f"⏳ <b>Status:</b> <code>[▓▓░░░░░░░░] 25% (Searching)</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+        )
+        await asyncio.sleep(2.5)
+
+        # ── Step 2: Fresh Number Found & OTP Sent Simulation ──
+        await send_tg_message(
+            client,
+            buyer_id,
+            f"📱 <b>[Step 2/4] Fresh Unregistered Number Mil Gaya!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📞 <b>Allocated Mobile:</b> <code>+91 {masked_phone}</code>\n"
+            f"📩 Official Meesho OTP dispatch kar diya gaya hai (Max wait: 2 mins)...\n"
+            f"⏳ <b>Status:</b> <code>[▓▓▓▓▓░░░░░] 55% (OTP Sent)</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+        )
+        await asyncio.sleep(2.5)
+
+        # ── Step 3: OTP Verified & Extracting Tokens Simulation ──
+        await send_tg_message(
+            client,
+            buyer_id,
+            f"⚡ <b>[Step 3/4] OTP Verify Ho Gaya & Session Generate Ho Raha Hai!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔐 <b>Verification:</b> <code>6-Digit OTP Verified ✅</code>\n"
+            f"⚙️ Meesho session tokens, cookies & xo/ox keys extract ho rahe hain...\n"
+            f"⏳ <b>Status:</b> <code>[▓▓▓▓▓▓▓▓░░] 85% (Extracting Tokens)</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+        )
+        await asyncio.sleep(2.0)
+
+        # ── Step 4: JSON Generation Complete Simulation ──
+        await send_tg_message(
+            client,
+            buyer_id,
+            f"✨ <b>[Step 4/4] Meesho Account JSON Ban Gya!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎉 <b>Account JSON Ban Kar Ready Hai!</b>\n"
+            f"📁 Packaging ready-to-use <code>.json</code> file...\n"
+            f"⏳ <b>Status:</b> <code>[▓▓▓▓▓▓▓▓▓▓] 100% (Complete)</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+        )
+        await asyncio.sleep(1.2)
+
+        # ── Step 5: Final Delivery Message & File Attachment ──
+        buyer_msg = (
+            f"🎉 <b>AAPKA MEESHO JSON ORDER READY HAI!</b>\n\n"
+            f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+            f"📱 <b>Mobile:</b> <code>+91 {masked_phone}</code>\n"
+            f"⚡ <b>Status:</b> 100% Verified & Delivered!\n\n"
+            f"📋 <b>Account JSON Data:</b>\n"
+            f"<pre><code>{content[:3000]}</code></pre>\n\n"
+            f"👇 Niche di gayi <code>.json</code> file download karke use karein. Thank you for shopping with us!"
+        )
+        await send_tg_message(client, buyer_id, buyer_msg, reply_markup=USER_MAIN_MENU_KEYBOARD)
+
+        if file_bytes:
+            await send_tg_document(
+                client,
+                buyer_id,
+                filename=filename or f"meesho_{phone}.json",
+                content=file_bytes,
+                caption=f"✅ Meesho Account JSON (+91{masked_phone})",
+            )
+        else:
+            await send_tg_document(
+                client,
+                buyer_id,
+                filename=filename or f"meesho_{phone}.json",
+                content=content,
+                caption=f"✅ Meesho Account JSON (+91{masked_phone})",
+            )
+
+        if admin_notify_id:
+            await send_tg_message(
+                client,
+                admin_notify_id,
+                f"🎉 <b>ORDER #{order_id} DELIVERED SUCCESSFULLY!</b>\n\n"
+                f"👤 <b>Buyer:</b> <code>{buyer_id}</code>\n"
+                f"📱 <b>Phone:</b> <code>+91{phone}</code>\n"
+                f"✨ User ko staged simulation ke sath JSON file successfully deliver ho gayi!",
+                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+            )
+    except Exception as e:
+        print(f"[Simulation Delivery Error] {e}")
 
 
 # ─── Automated Order Mining & Admin Delivery Task ─────────────────────────────
@@ -3594,13 +3789,51 @@ async def bot_loop():
                                 await answer_tg_callback(client, cb_id, f"⚠️ Order already {ord_item.get('status')}!", show_alert=True)
                                 continue
 
-                            await answer_tg_callback(client, cb_id, f"✅ Order {order_id} Approved! Auto-hunt started.")
+                            ord_item["status"] = "PAID_APPROVED"
+                            ord_item["approved_at"] = time.time()
+                            save_order(ord_item)
+
+                            buyer_id = str(ord_item.get("user_id"))
+                            await answer_tg_callback(client, cb_id, f"✅ Order #{order_id} Payment Verified!")
+                            await send_tg_message(
+                                client,
+                                buyer_id,
+                                f"✅ <b>PAYMENT VERIFIED BY ADMIN!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+                                f"⚡ <b>Status:</b> <code>Payment Verified — Start Making Account!</code>\n\n"
+                                f"🔍 <i>Hamara automated server fresh number search aur session generation initiate kar raha hai...</i>\n"
+                                f"⏳ <i>Kripya thoda intezaar karein, jaise hi JSON generate hoga aapko deliver ho jayega!</i>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━",
+                                reply_markup=USER_MAIN_MENU_KEYBOARD,
+                            )
+                            admin_paid_kb = {
+                                "inline_keyboard": [
+                                    [{"text": f"📤 Deliver JSON to User", "callback_data": f"deliver_custom_{order_id}"}],
+                                    [{"text": f"🚀 Launch Auto-Hunt for #{order_id}", "callback_data": f"hunt_ord_{order_id}"}],
+                                    [{"text": f"👥 View All Paid Users", "callback_data": "view_paid_users"}]
+                                ]
+                            }
                             await send_tg_message(
                                 client,
                                 cb_chat_id,
-                                f"🚀 <b>Order Approved!</b> Starting on-demand auto-hunt for Order <code>{order_id}</code>...",
-                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                f"✅ <b>Order #{order_id} Payment Verified!</b>\n\n"
+                                f"👤 <b>Buyer:</b> <code>{buyer_id}</code> (@{ord_item.get('username') or 'N/A'})\n"
+                                f"💰 <b>Amount:</b> ₹{ord_item.get('amount')}\n"
+                                f"📦 <b>Type:</b> {ord_item.get('order_type', 'Standard')}\n\n"
+                                f"👉 User ko notification chali gayi hai: <i>'Payment verified, start making account'</i>.\n"
+                                f"Aap niche button se user ko JSON deliver kar sakte hain ya auto-hunt shuru kar sakte hain.",
+                                reply_markup=admin_paid_kb,
                             )
+                            continue
+
+                        # ── Admin Launch Auto-Hunt for Order Callback ──
+                        elif cb_data.startswith("hunt_ord_"):
+                            order_id = cb_data.replace("hunt_ord_", "").strip()
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id, f"🚀 Auto-Hunt started for #{order_id}!")
                             asyncio.create_task(mine_and_deliver_order(client, order_id))
                             continue
 
@@ -3629,7 +3862,7 @@ async def bot_loop():
                             await send_tg_message(client, cb_chat_id, f"❌ Order <code>{order_id}</code> mark as REJECTED.")
                             continue
 
-                        # ── Admin Deliver Mined JSON to Buyer Callback ──
+                        # ── Admin Deliver Mined JSON to Buyer Callback (with Realistic Simulation) ──
                         elif cb_data.startswith("send_mined_"):
                             order_id = cb_data.replace("send_mined_", "").strip()
                             if not is_admin(cb_user_id):
@@ -3650,30 +3883,23 @@ async def bot_loop():
                             ord_item["delivered_at"] = time.time()
                             save_order(ord_item)
 
-                            buyer_msg = (
-                                f"🎉 <b>AAPKA MEESHO JSON ORDER READY HAI!</b>\n\n"
-                                f"🆔 <b>Order ID:</b> <code>{order_id}</code>\n"
-                                f"📱 <b>Mobile:</b> <code>+91{mined_phone}</code>\n"
-                                f"⚡ <b>Status:</b> 100% Verified & Delivered!\n\n"
-                                f"📋 <b>Account JSON:</b>\n"
-                                f"<pre><code>{mined_json}</code></pre>\n\n"
-                                f"👇 Niche di gayi <code>.json</code> file download karke use karein. Thank you for shopping with us!"
-                            )
-                            await send_tg_message(client, buyer_id, buyer_msg, reply_markup=USER_MAIN_MENU_KEYBOARD)
-                            await send_tg_document(
-                                client,
-                                buyer_id,
-                                filename=f"meesho_{mined_phone}.json",
-                                content=mined_json,
-                                caption=f"✅ Meesho Account JSON (+91{mined_phone})",
-                            )
-
-                            await answer_tg_callback(client, cb_id, f"✅ Order {order_id} delivered to buyer!")
+                            await answer_tg_callback(client, cb_id, f"🚀 Delivering to #{order_id} with realistic simulation...")
                             await send_tg_message(
                                 client,
                                 cb_chat_id,
-                                f"✅ Order <code>{order_id}</code> (Mined account +91{mined_phone}) successfully delivered to User <code>{buyer_id}</code>!",
+                                f"🚀 <b>Delivery Started for Order #{order_id}!</b>\n\nUser <code>{buyer_id}</code> ko realistic progress updates ke sath JSON deliver kiya jaa raha hai...",
                                 reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                            asyncio.create_task(
+                                deliver_json_with_simulation(
+                                    client,
+                                    buyer_id,
+                                    order_id,
+                                    content=mined_json,
+                                    filename=f"meesho_{mined_phone}.json",
+                                    phone_hint=mined_phone,
+                                    admin_notify_id=cb_chat_id,
+                                )
                             )
                             continue
 
@@ -3756,6 +3982,92 @@ async def bot_loop():
                                 f"❌ Order <code>{order_id}</code> cancel ho gaya.",
                                 reply_markup=USER_MAIN_MENU_KEYBOARD,
                             )
+                            continue
+
+                        # ── Admin View Paid Users Queue Callback ──
+                        elif cb_data == "view_paid_users":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id, "🔄 Updating orders...")
+                            text_view, kb_view = build_paid_orders_view_message_and_markup()
+                            await send_tg_message(client, cb_chat_id, text_view, reply_markup=kb_view)
+                            continue
+
+                        # ── Buyer Choose Account Type: Standard (₹20) ──
+                        elif cb_data == "order_type_standard":
+                            std_price = get_store_price()
+                            order_id = f"ORD{int(time.time()) % 1000000:06d}"
+                            store_st = load_store_settings()
+                            upi_id = store_st.get("upi_id", "paytmqr28100505010115i3puxb4eoa@paytm")
+                            upi_name = store_st.get("upi_name", "Meesho Store")
+
+                            new_order = {
+                                "id": order_id,
+                                "user_id": str(cb_user_id),
+                                "username": cb_from.get("username", ""),
+                                "first_name": cb_from.get("first_name", "User"),
+                                "amount": std_price,
+                                "order_type": "Standard Fresh",
+                                "custom_referral_link": None,
+                                "status": "AWAITING_PAYMENT",
+                                "created_at": time.time(),
+                                "utr": None,
+                            }
+                            save_order(new_order)
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["awaiting_utr_order"] = order_id
+
+                            await answer_tg_callback(client, cb_id, f"Standard Order #{order_id} Created!")
+                            qr_bytes = generate_upi_qr_bytes(upi_id, upi_name, std_price, order_id)
+                            invoice_caption = (
+                                f"🧾 <b>MEESHO JSON OFFICIAL INVOICE</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+                                f"📦 <b>Type:</b> Standard Fresh Account\n"
+                                f"💵 <b>Total Payable:</b> <b>₹{std_price}</b> (OTP Number)\n"
+                                f"👤 <b>Payee Name:</b> {upi_name}\n"
+                                f"📲 <b>UPI ID:</b> <code>{upi_id}</code>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📌 <b>PAYMENT STEPS:</b>\n"
+                                f"1️⃣ Upar diye gaye QR Code ko Paytm / PhonePe / GPay se scan karein.\n"
+                                f"2️⃣ <b>₹{std_price}</b> ka exact payment karein.\n"
+                                f"3️⃣ Payment ke baad <b>12-digit UTR / Ref Number</b> copy karein.\n"
+                                f"4️⃣ Niche <b>Submit UTR</b> button dabakar ya seedhe yahan UTR likhkar bhejein.\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"⚡ <i>Admin payment verify karte hi fresh number process start ho jayega!</i>"
+                            )
+                            qr_inline_kb = {
+                                "inline_keyboard": [
+                                    [{"text": "💳 Submit UTR / Ref No", "callback_data": f"submit_utr_{order_id}"}],
+                                    [{"text": "❌ Cancel Order", "callback_data": f"cancel_ord_{order_id}"}],
+                                ]
+                            }
+                            await send_tg_photo(client, cb_chat_id, qr_bytes, caption=invoice_caption, reply_markup=qr_inline_kb)
+                            continue
+
+                        # ── Buyer Choose Account Type: Custom Referral (₹25) ──
+                        elif cb_data == "order_type_custom":
+                            ref_price = get_store_referral_price()
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_buyer_custom_ref"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"🔗 <b>APNA MEESHO REFERRAL LINK BHEJEIN (₹{ref_price}):</b>\n\n"
+                                f"Aapne <b>Custom Referral Account (₹{ref_price})</b> chuna hai.\n\n"
+                                f"👉 <i>Apna official Meesho referral link yahan paste karke bhejein:</i>\n"
+                                f"<i>(Jaise: <code>https://app.meesho.com/2yoV/...</code>)</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        # ── Buyer Cancel Account Type Selection ──
+                        elif cb_data == "cancel_buy_selection":
+                            await answer_tg_callback(client, cb_id, "Cancelled.")
+                            await send_tg_message(client, cb_chat_id, "❌ Selection cancel kar di gayi.", reply_markup=USER_MAIN_MENU_KEYBOARD)
                             continue
 
                         # ── Admin Store Settings Callbacks ──
@@ -4230,28 +4542,25 @@ async def bot_loop():
                                 save_order(ord_item)
                                 state["awaiting_custom_delivery_order"] = None
 
-                                buyer_msg = (
-                                    f"🎉 <b>AAPKA MEESHO JSON ORDER READY HAI!</b>\n\n"
-                                    f"🆔 <b>Order ID:</b> <code>{target_ord_id}</code>\n"
-                                    f"⚡ <b>Status:</b> 100% Verified & Delivered!\n\n"
-                                    f"📋 <b>Account Details:</b>\n"
-                                    f"<pre><code>{content[:3000]}</code></pre>\n\n"
-                                    f"👇 Niche di gayi <code>.json</code> file download karke use karein. Thank you for shopping with us!"
-                                )
-                                await send_tg_message(client, buyer_id, buyer_msg, reply_markup=USER_MAIN_MENU_KEYBOARD)
-                                if file_bytes:
-                                    await send_tg_document(client, buyer_id, filename=filename, content=file_bytes, caption=f"✅ Meesho Account JSON ({filename})")
-                                else:
-                                    await send_tg_document(client, buyer_id, filename=f"order_{target_ord_id}.json", content=content, caption=f"✅ Meesho Account JSON (Order #{target_ord_id})")
-
                                 await send_tg_message(
                                     client,
                                     chat_id,
-                                    f"🎉 <b>CUSTOM FILE SUCCESSFULLY DELIVERED!</b>\n\n"
-                                    f"🆔 <b>Order ID:</b> <code>{target_ord_id}</code>\n"
-                                    f"👤 <b>Buyer ID:</b> <code>{buyer_id}</code>\n"
-                                    f"Status: <b>COMPLETED</b>",
+                                    f"🚀 <b>Delivery Initiated for Order #{target_ord_id}!</b>\n\n"
+                                    f"👤 <b>Buyer:</b> <code>{buyer_id}</code>\n"
+                                    f"Bot user ko staged number finding & JSON creation progress dikhakar file deliver karega...",
                                     reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                )
+
+                                asyncio.create_task(
+                                    deliver_json_with_simulation(
+                                        client,
+                                        buyer_id,
+                                        target_ord_id,
+                                        content=content,
+                                        file_bytes=file_bytes,
+                                        filename=filename,
+                                        admin_notify_id=chat_id,
+                                    )
                                 )
                                 continue
 
@@ -4314,11 +4623,13 @@ async def bot_loop():
 
                                 # Alert Admin
                                 if ADMIN_CHAT_ID:
+                                    ref_info = f"\n🔗 <b>Buyer's Refer Link:</b>\n<code>{order.get('custom_referral_link')}</code>" if order.get('custom_referral_link') else ""
                                     admin_alert = (
                                         f"🚨 <b>NEW MEESHO JSON PAYMENT RECEIVED!</b>\n"
                                         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                         f"🆔 <b>Order ID:</b> <code>#{order['id']}</code>\n"
                                         f"👤 <b>Buyer:</b> {first_name} (@{username} | ID: <code>{chat_id}</code>)\n"
+                                        f"📦 <b>Account Type:</b> {order.get('order_type', 'Standard Fresh')}{ref_info}\n"
                                         f"💰 <b>Amount:</b> ₹{order['amount']}\n"
                                         f"🔢 <b>UTR / Ref:</b> <code>{extracted_utr}</code>\n"
                                         f"📅 <b>Time:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -4328,12 +4639,15 @@ async def bot_loop():
                                     admin_inline_kb = {
                                         "inline_keyboard": [
                                             [
-                                                {"text": "✅ Approve & Start Hunt", "callback_data": f"approve_ord_{order['id']}"},
-                                                {"text": "📁 Deliver Custom JSON", "callback_data": f"deliver_custom_{order['id']}"},
+                                                {"text": "✅ Verify Payment", "callback_data": f"approve_ord_{order['id']}"},
+                                                {"text": "📁 Deliver JSON", "callback_data": f"deliver_custom_{order['id']}"},
                                             ],
                                             [
+                                                {"text": "🚀 Verify & Auto-Hunt", "callback_data": f"hunt_ord_{order['id']}"},
                                                 {"text": "💬 Message Buyer", "callback_data": f"reply_user_{chat_id}"},
-                                                {"text": "❌ Reject", "callback_data": f"reject_ord_{order['id']}"},
+                                            ],
+                                            [
+                                                {"text": "❌ Reject Order", "callback_data": f"reject_ord_{order['id']}"},
                                             ]
                                         ]
                                     }
@@ -4342,63 +4656,116 @@ async def bot_loop():
 
                         # ── Buyer /start or /help ──
                         if text.startswith("/start") or text.startswith("/help"):
+                            std_p = get_store_price()
+                            ref_p = get_store_referral_price()
                             welcome_text = (
-                                f"🛍️ <b>WELCOME TO MEESHO JSON STORE</b>\n"
+                                f"🛍️ <b>WELCOME TO MEESHO JSON STORE & GENERATOR</b>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"⚡ <b>100% Fresh • Unregistered • High-Speed Delivery</b>\n\n"
-                                f"💎 <b>Instant Premium Meesho Accounts:</b>\n"
-                                f"• <b>Live Price:</b> <code>₹{current_price} / Account</code>\n"
-                                f"• <b>Account Type:</b> 100% Fresh Unregistered OTP Login\n"
-                                f"• <b>Format:</b> Clean & Ready-to-use <code>.json</code> File\n"
-                                f"• <b>Delivery:</b> Direct File Download in Telegram\n\n"
-                                f"👇 <i>Niche diye gaye menu se <b>🛍️ Buy Meesho JSON</b> dabayein!</i>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━"
+                                f"⚡ <b>100% Fresh • Unregistered • High-Speed JSON Maker</b>\n\n"
+                                f"💎 <b>Account Pricing:</b>\n"
+                                f"• 📱 <b>Standard Fresh Account:</b> <code>₹{std_p} / Account</code> (OTP Number Cost)\n"
+                                f"• 🔗 <b>Apna Meesho Referral Link:</b> <code>₹{ref_p} / Account</code> (Custom Refer Processing)\n\n"
+                                f"📌 <b>Kaise Kaam Karta Hai?</b>\n"
+                                f"1️⃣ Niche <b>🛍️ Buy Meesho JSON</b> par click karein.\n"
+                                f"2️⃣ Account type choose karein (Standard ₹{std_p} ya Apna Refer Link ₹{ref_p}).\n"
+                                f"3️⃣ QR code scan karke UPI payment karein aur 12-digit UTR submit karein.\n"
+                                f"4️⃣ Admin payment verify karenge aur turant fresh number hunt start ho jayega.\n"
+                                f"5️⃣ Number find hote hi OTP verify hokar ready-to-use <code>.json</code> file deliver ho jayegi!\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"👇 <i>Niche diye gaye button se shuru karein:</i>"
                             )
                             await send_tg_message(client, chat_id, welcome_text, reply_markup=USER_MAIN_MENU_KEYBOARD)
                             continue
 
+                        # ── Buyer Step: Submitting Custom Referral Link ──
+                        elif state.get("manual_step") == "awaiting_buyer_custom_ref":
+                            buyer_ref = text.strip()
+                            if buyer_ref.startswith("http://") or buyer_ref.startswith("https://") or "meesho.com" in buyer_ref:
+                                state["manual_step"] = None
+                                ref_p = get_store_referral_price()
+                                order_id = f"ORD{int(time.time()) % 1000000:06d}"
+                                store_st = load_store_settings()
+                                upi_id = store_st.get("upi_id", "paytmqr28100505010115i3puxb4eoa@paytm")
+                                upi_name = store_st.get("upi_name", "Meesho Store")
+
+                                new_order = {
+                                    "id": order_id,
+                                    "user_id": str(chat_id),
+                                    "username": username,
+                                    "first_name": first_name,
+                                    "amount": ref_p,
+                                    "order_type": "Custom Referral",
+                                    "custom_referral_link": buyer_ref,
+                                    "status": "AWAITING_PAYMENT",
+                                    "created_at": time.time(),
+                                    "utr": None,
+                                }
+                                save_order(new_order)
+                                state["awaiting_utr_order"] = order_id
+
+                                qr_bytes = generate_upi_qr_bytes(upi_id, upi_name, ref_p, order_id)
+                                invoice_caption = (
+                                    f"🧾 <b>MEESHO JSON OFFICIAL INVOICE</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+                                    f"📦 <b>Type:</b> Custom Referral Account\n"
+                                    f"🔗 <b>Attached Refer Link:</b>\n<code>{buyer_ref}</code>\n"
+                                    f"💵 <b>Total Payable:</b> <b>₹{ref_p}</b> (OTP Number + Custom Link)\n"
+                                    f"👤 <b>Payee Name:</b> {upi_name}\n"
+                                    f"📲 <b>UPI ID:</b> <code>{upi_id}</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📌 <b>PAYMENT STEPS:</b>\n"
+                                    f"1️⃣ Upar diye gaye QR Code ko Paytm / PhonePe / GPay se scan karein.\n"
+                                    f"2️⃣ <b>₹{ref_p}</b> ka exact payment karein.\n"
+                                    f"3️⃣ Payment ke baad <b>12-digit UTR / Ref Number</b> copy karein.\n"
+                                    f"4️⃣ Niche <b>Submit UTR</b> button dabakar ya seedhe yahan UTR likhkar bhejein.\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"⚡ <i>Admin payment verify karte hi aapka fresh account process hona shuru ho jayega!</i>"
+                                )
+                                qr_inline_kb = {
+                                    "inline_keyboard": [
+                                        [{"text": "💳 Submit UTR / Ref No", "callback_data": f"submit_utr_{order_id}"}],
+                                        [{"text": "❌ Cancel Order", "callback_data": f"cancel_ord_{order_id}"}],
+                                    ]
+                                }
+                                await send_tg_photo(client, chat_id, qr_bytes, caption=invoice_caption, reply_markup=qr_inline_kb)
+                                continue
+                            else:
+                                await send_tg_message(client, chat_id, "❌ Kripya valid Meesho URL bhejein (jaise: <code>https://app.meesho.com/...</code> ya <code>/cancel</code> bhejein).")
+                                continue
+
                         # ── Buyer Buy Meesho JSON ──
                         elif text in ("🛍️ Buy Meesho JSON", "/buy", "buy", "Buy"):
-                            order_id = f"ORD{int(time.time()) % 1000000:06d}"
-                            upi_id = store_settings.get("upi_id", "paytmqr28100505010115i3puxb4eoa@paytm")
-                            upi_name = store_settings.get("upi_name", "Meesho Store")
+                            std_p = get_store_price()
+                            ref_p = get_store_referral_price()
 
-                            new_order = {
-                                "id": order_id,
-                                "user_id": str(chat_id),
-                                "username": username,
-                                "first_name": first_name,
-                                "amount": current_price,
-                                "status": "AWAITING_PAYMENT",
-                                "created_at": time.time(),
-                                "utr": None,
-                            }
-                            save_order(new_order)
-                            state["awaiting_utr_order"] = order_id
-
-                            qr_bytes = generate_upi_qr_bytes(upi_id, upi_name, current_price, order_id)
-                            invoice_caption = (
-                                f"🧾 <b>MEESHO JSON OFFICIAL INVOICE</b>\n"
+                            buy_prompt = (
+                                f"🛍️ <b>MEESHO FRESH JSON GENERATOR</b>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
-                                f"💵 <b>Total Payable:</b> <b>₹{current_price}</b>\n"
-                                f"👤 <b>Payee Name:</b> {upi_name}\n"
-                                f"📲 <b>UPI ID:</b> <code>{upi_id}</code>\n"
+                                f"Kripya account generation type select karein:\n\n"
+                                f"1️⃣ <b>Standard Fresh Account — ₹{std_p}</b>\n"
+                                f"• 100% Unregistered Indian OTP Number\n"
+                                f"• Ready-to-use Meesho Session JSON\n\n"
+                                f"2️⃣ <b>Custom Referral Account — ₹{ref_p}</b>\n"
+                                f"• <b>Aapka apna Meesho referral link</b> use hoga\n"
+                                f"• Referral cash & discounts directly aapke account mein add honge\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📌 <b>PAYMENT STEPS:</b>\n"
-                                f"1️⃣ Upar diye gaye QR Code ko Paytm / PhonePe / GPay se scan karein.\n"
-                                f"2️⃣ <b>₹{current_price}</b> ka exact payment karein.\n"
-                                f"3️⃣ Payment ke baad <b>12-digit UTR / Ref Number</b> copy karein.\n"
-                                f"4️⃣ Niche <b>Submit UTR</b> button dabakar ya seedhe yahan UTR likhkar bhejein.\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━"
+                                f"👇 <i>Niche diye gaye button par click karein:</i>"
                             )
-                            qr_inline_kb = {
+                            buy_kb = {
                                 "inline_keyboard": [
-                                    [{"text": "💳 Submit UTR / Ref No", "callback_data": f"submit_utr_{order_id}"}],
-                                    [{"text": "❌ Cancel Order", "callback_data": f"cancel_ord_{order_id}"}],
+                                    [
+                                        {"text": f"⚡ 1. Standard Account (₹{std_p})", "callback_data": "order_type_standard"},
+                                    ],
+                                    [
+                                        {"text": f"🔗 2. Apna Referral Link (₹{ref_p})", "callback_data": "order_type_custom"},
+                                    ],
+                                    [
+                                        {"text": "❌ Cancel", "callback_data": "cancel_buy_selection"},
+                                    ]
                                 ]
                             }
-                            await send_tg_photo(client, chat_id, qr_bytes, caption=invoice_caption, reply_markup=qr_inline_kb)
+                            await send_tg_message(client, chat_id, buy_prompt, reply_markup=buy_kb)
                             continue
 
                         # ── Buyer My Orders ──
@@ -4800,23 +5167,11 @@ async def bot_loop():
                         else:
                             await send_tg_message(client, chat_id, "❌ Kripya valid numeric amount bhejein (jaise: <code>99</code>).")
 
-                    # ── 📦 View Orders (Admin) ──
-                    elif text in ("📦 View Orders", "/orders", "/allorders"):
-                        all_ords = load_orders()
-                        if not all_ords:
-                            await send_tg_message(client, chat_id, "ℹ️ Koi orders nahi mile.", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
-                            continue
-
-                        sorted_ords = sorted(all_ords.values(), key=lambda x: x.get("created_at", 0), reverse=True)[:8]
-                        lines = ["📦 <b>ALL STORE ORDERS:</b>\n"]
-                        for o in sorted_ords:
-                            st_icon = "🟢" if o.get("status") == "COMPLETED" else "🟡" if o.get("status") in ("PENDING_APPROVAL", "PROCESSING", "READY_FOR_DELIVERY") else "❌" if o.get("status") == "REJECTED" else "⚪"
-                            lines.append(
-                                f"{st_icon} <b>Order #{o.get('id')}</b> | User: <code>{o.get('user_id')}</code> (@{o.get('username') or 'N/A'})\n"
-                                f"• Amount: ₹{o.get('amount')} | Status: <b>{o.get('status')}</b>\n"
-                                f"• UTR: <code>{o.get('utr') or 'N/A'}</code> | Deliver: <code>/deliver {o.get('id')}</code>\n"
-                            )
-                        await send_tg_message(client, chat_id, "\n".join(lines), reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                    # ── 👥 Paid Users / Orders (Admin) ──
+                    elif text in ("👥 Paid Users / Orders", "📦 View Orders", "/orders", "/allorders", "/paidusers"):
+                        text_view, kb_view = build_paid_orders_view_message_and_markup()
+                        await send_tg_message(client, chat_id, text_view, reply_markup=kb_view)
+                        continue
 
                     # ── /setupi <upi_id> [name] (Admin) ──
                     elif text.startswith("/setupi"):
