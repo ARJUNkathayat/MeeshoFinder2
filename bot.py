@@ -2317,6 +2317,7 @@ KNOWN_MENU_BUTTONS = {
     "🔄 Convert JSON",
     "⚙️ Store Settings",
     "👥 Paid Users / Orders",
+    "📢 Broadcast",
     "📦 View Orders",
     "💰 Balance",
     "🛑 Stop Hunt",
@@ -2340,7 +2341,7 @@ ADMIN_MAIN_MENU_KEYBOARD = {
         [{"text": "📋 Accounts Summary"}, {"text": "📊 Stats"}],
         [{"text": "📝 Set JSON Format"}, {"text": "🔄 Convert JSON"}],
         [{"text": "⚙️ Store Settings"}, {"text": "👥 Paid Users / Orders"}],
-        [{"text": "💰 Balance"}, {"text": "🛑 Stop Hunt"}],
+        [{"text": "📢 Broadcast"}, {"text": "💰 Balance"}, {"text": "🛑 Stop Hunt"}],
     ],
     "resize_keyboard": True,
 }
@@ -2538,6 +2539,126 @@ async def deliver_json_with_simulation(
             )
     except Exception as e:
         print(f"[Simulation Delivery Error] {e}")
+
+
+# ─── User Tracking Registry & Invoice Generator ───────────────────────────────
+ALL_USERS_FILE = "all_users.json"
+
+
+def register_user_activity(user_id: int | str, username: str = "", first_name: str = ""):
+    if not user_id:
+        return
+    try:
+        users = {}
+        if os.path.exists(ALL_USERS_FILE):
+            try:
+                with open(ALL_USERS_FILE, "r", encoding="utf-8") as f:
+                    users = json.load(f)
+            except Exception:
+                users = {}
+        uid = str(user_id)
+        existing = users.get(uid, {})
+        users[uid] = {
+            "user_id": uid,
+            "username": username or existing.get("username", ""),
+            "first_name": first_name or existing.get("first_name", ""),
+            "last_seen": time.time(),
+        }
+        with open(ALL_USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(users, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[RegisterUser Error] {e}")
+
+
+def get_all_broadcast_recipients() -> set:
+    recipients = set()
+    if os.path.exists(ALL_USERS_FILE):
+        try:
+            with open(ALL_USERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for uid in data.keys():
+                    recipients.add(str(uid))
+        except Exception:
+            pass
+
+    all_cfgs = load_all_configs()
+    for cid in all_cfgs.keys():
+        recipients.add(str(cid))
+
+    all_ords = load_orders()
+    for o in all_ords.values():
+        if o.get("user_id"):
+            recipients.add(str(o["user_id"]))
+
+    if str(ADMIN_CHAT_ID) in recipients:
+        recipients.remove(str(ADMIN_CHAT_ID))
+    return recipients
+
+
+async def create_and_send_buyer_invoice(
+    client: httpx.AsyncClient,
+    chat_id: int | str,
+    user_id: int | str,
+    username: str,
+    first_name: str,
+    order_type: str,
+    quantity: int,
+    unit_price: int,
+    custom_referral_link: str | None = None,
+):
+    total_amount = quantity * unit_price
+    order_id = f"ORD{int(time.time()) % 1000000:06d}"
+    store_st = load_store_settings()
+    upi_id = store_st.get("upi_id", "paytmqr28100505010115i3puxb4eoa@paytm")
+    upi_name = store_st.get("upi_name", "Meesho Store")
+
+    new_order = {
+        "id": order_id,
+        "user_id": str(user_id),
+        "username": username,
+        "first_name": first_name,
+        "amount": total_amount,
+        "quantity": quantity,
+        "unit_price": unit_price,
+        "order_type": order_type,
+        "custom_referral_link": custom_referral_link,
+        "status": "AWAITING_PAYMENT",
+        "created_at": time.time(),
+        "utr": None,
+    }
+    save_order(new_order)
+    st = ACTIVE_TASKS.setdefault(chat_id, {})
+    st["awaiting_utr_order"] = order_id
+    st["manual_step"] = None
+
+    qr_bytes = generate_upi_qr_bytes(upi_id, upi_name, total_amount, order_id)
+    ref_line = f"🔗 <b>Attached Refer Link:</b>\n<code>{custom_referral_link}</code>\n" if custom_referral_link else ""
+    invoice_caption = (
+        f"🧾 <b>MEESHO JSON OFFICIAL INVOICE</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
+        f"📦 <b>Type:</b> {order_type}\n"
+        f"🔢 <b>Quantity:</b> <b>{quantity} Account(s)</b> (@ ₹{unit_price}/acc)\n"
+        f"{ref_line}"
+        f"💵 <b>Total Payable:</b> <b>₹{total_amount}</b>\n"
+        f"👤 <b>Payee Name:</b> {upi_name}\n"
+        f"📲 <b>UPI ID:</b> <code>{upi_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>PAYMENT STEPS:</b>\n"
+        f"1️⃣ Upar diye gaye QR Code ko Paytm / PhonePe / GPay se scan karein.\n"
+        f"2️⃣ <b>₹{total_amount}</b> ka exact payment karein.\n"
+        f"3️⃣ Payment ke baad <b>12-digit UTR / Ref Number</b> copy karein.\n"
+        f"4️⃣ Niche <b>Submit UTR</b> button dabakar ya seedhe yahan UTR likhkar bhejein.\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ <i>Admin payment verify karte hi fresh accounts process hona shuru ho jayenge!</i>"
+    )
+    qr_inline_kb = {
+        "inline_keyboard": [
+            [{"text": "💳 Submit UTR / Ref No", "callback_data": f"submit_utr_{order_id}"}],
+            [{"text": "❌ Cancel Order", "callback_data": f"cancel_ord_{order_id}"}],
+        ]
+    }
+    await send_tg_photo(client, chat_id, qr_bytes, caption=invoice_caption, reply_markup=qr_inline_kb)
 
 
 # ─── Automated Order Mining & Admin Delivery Task ─────────────────────────────
@@ -3771,6 +3892,7 @@ async def bot_loop():
                         cb_data = cb.get("data", "")
                         cb_msg = cb.get("message")
                         cb_chat_id = cb_msg["chat"]["id"] if cb_msg else cb_user_id
+                        register_user_activity(cb_user_id, cb_from.get("username", ""), cb_from.get("first_name", ""))
                         print(f"[{time.strftime('%H:%M:%S')}] [TG Callback] user={cb_user_id} data={cb_data}", flush=True)
 
                         # ── Admin Approve Order Callback ──
@@ -3997,54 +4119,76 @@ async def bot_loop():
                         # ── Buyer Choose Account Type: Standard (₹20) ──
                         elif cb_data == "order_type_standard":
                             std_price = get_store_price()
-                            order_id = f"ORD{int(time.time()) % 1000000:06d}"
-                            store_st = load_store_settings()
-                            upi_id = store_st.get("upi_id", "paytmqr28100505010115i3puxb4eoa@paytm")
-                            upi_name = store_st.get("upi_name", "Meesho Store")
-
-                            new_order = {
-                                "id": order_id,
-                                "user_id": str(cb_user_id),
-                                "username": cb_from.get("username", ""),
-                                "first_name": cb_from.get("first_name", "User"),
-                                "amount": std_price,
-                                "order_type": "Standard Fresh",
-                                "custom_referral_link": None,
-                                "status": "AWAITING_PAYMENT",
-                                "created_at": time.time(),
-                                "utr": None,
-                            }
-                            save_order(new_order)
-                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
-                            st["awaiting_utr_order"] = order_id
-
-                            await answer_tg_callback(client, cb_id, f"Standard Order #{order_id} Created!")
-                            qr_bytes = generate_upi_qr_bytes(upi_id, upi_name, std_price, order_id)
-                            invoice_caption = (
-                                f"🧾 <b>MEESHO JSON OFFICIAL INVOICE</b>\n"
+                            await answer_tg_callback(client, cb_id)
+                            qty_prompt = (
+                                f"⚡ <b>STANDARD FRESH MEESHO ACCOUNTS</b>\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
-                                f"📦 <b>Type:</b> Standard Fresh Account\n"
-                                f"💵 <b>Total Payable:</b> <b>₹{std_price}</b> (OTP Number)\n"
-                                f"👤 <b>Payee Name:</b> {upi_name}\n"
-                                f"📲 <b>UPI ID:</b> <code>{upi_id}</code>\n"
+                                f"Kripya accounts ki quantity select karein:\n\n"
+                                f"📌 <b>Order Limits:</b>\n"
+                                f"• <b>Minimum Order:</b> 1 Account\n"
+                                f"• <b>Maximum Limit:</b> 20 Accounts / Order\n"
+                                f"• <b>Price:</b> ₹{std_price} / Account (OTP Number)\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📌 <b>PAYMENT STEPS:</b>\n"
-                                f"1️⃣ Upar diye gaye QR Code ko Paytm / PhonePe / GPay se scan karein.\n"
-                                f"2️⃣ <b>₹{std_price}</b> ka exact payment karein.\n"
-                                f"3️⃣ Payment ke baad <b>12-digit UTR / Ref Number</b> copy karein.\n"
-                                f"4️⃣ Niche <b>Submit UTR</b> button dabakar ya seedhe yahan UTR likhkar bhejein.\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"⚡ <i>Admin payment verify karte hi fresh number process start ho jayega!</i>"
+                                f"👇 <i>Quantity choose karein ya custom number likhein:</i>"
                             )
-                            qr_inline_kb = {
+                            qty_kb = {
                                 "inline_keyboard": [
-                                    [{"text": "💳 Submit UTR / Ref No", "callback_data": f"submit_utr_{order_id}"}],
-                                    [{"text": "❌ Cancel Order", "callback_data": f"cancel_ord_{order_id}"}],
+                                    [
+                                        {"text": f"1 Acc (₹{1 * std_price})", "callback_data": "std_qty_1"},
+                                        {"text": f"2 Accs (₹{2 * std_price})", "callback_data": "std_qty_2"},
+                                        {"text": f"5 Accs (₹{5 * std_price})", "callback_data": "std_qty_5"},
+                                    ],
+                                    [
+                                        {"text": f"10 Accs (₹{10 * std_price})", "callback_data": "std_qty_10"},
+                                        {"text": f"20 Accs (₹{20 * std_price})", "callback_data": "std_qty_20"},
+                                    ],
+                                    [
+                                        {"text": "✏️ Enter Custom Quantity (1-20)", "callback_data": "std_qty_custom"},
+                                    ],
+                                    [
+                                        {"text": "❌ Cancel", "callback_data": "cancel_buy_selection"},
+                                    ]
                                 ]
                             }
-                            await send_tg_photo(client, cb_chat_id, qr_bytes, caption=invoice_caption, reply_markup=qr_inline_kb)
+                            await send_tg_message(client, cb_chat_id, qty_prompt, reply_markup=qty_kb)
                             continue
+
+                        # ── Standard Account Quantity Selected (Buttons) ──
+                        elif cb_data.startswith("std_qty_"):
+                            std_price = get_store_price()
+                            q_param = cb_data.replace("std_qty_", "").strip()
+                            if q_param == "custom":
+                                st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                                st["manual_step"] = "awaiting_std_custom_qty"
+                                await answer_tg_callback(client, cb_id)
+                                cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                                await send_tg_message(
+                                    client,
+                                    cb_chat_id,
+                                    f"🔢 <b>Standard Account Quantity Bhejein:</b>\n\n"
+                                    f"Kitne accounts generate karwane hain? Number likhkar bhejein:\n"
+                                    f"• <b>Allowed Range:</b> 1 se 20 accounts\n"
+                                    f"• <b>Price:</b> ₹{std_price} / Account\n"
+                                    f"<i>(Jaise: <code>3</code> ya <code>7</code> ya <code>12</code>)</i>",
+                                    reply_markup=cancel_markup,
+                                )
+                                continue
+                            elif q_param.isdigit():
+                                qty = int(q_param)
+                                qty = max(1, min(20, qty))
+                                await answer_tg_callback(client, cb_id, f"{qty} accounts selected!")
+                                await create_and_send_buyer_invoice(
+                                    client,
+                                    cb_chat_id,
+                                    cb_user_id,
+                                    cb_from.get("username", ""),
+                                    cb_from.get("first_name", "User"),
+                                    "Standard Fresh",
+                                    qty,
+                                    std_price,
+                                    custom_referral_link=None,
+                                )
+                                continue
 
                         # ── Buyer Choose Account Type: Custom Referral (₹25) ──
                         elif cb_data == "order_type_custom":
@@ -4056,13 +4200,59 @@ async def bot_loop():
                             await send_tg_message(
                                 client,
                                 cb_chat_id,
-                                f"🔗 <b>APNA MEESHO REFERRAL LINK BHEJEIN (₹{ref_price}):</b>\n\n"
-                                f"Aapne <b>Custom Referral Account (₹{ref_price})</b> chuna hai.\n\n"
+                                f"🔗 <b>APNA MEESHO REFERRAL LINK BHEJEIN:</b>\n\n"
+                                f"Aapne <b>Custom Referral Account (₹{ref_price}/acc)</b> chuna hai.\n\n"
+                                f"⚠️ <b>Important Rules:</b>\n"
+                                f"• Apna link use karne par <b>Minimum 5 Accounts</b> lene honge.\n"
+                                f"• Maximum limit <b>20 Accounts</b> per order hai.\n\n"
                                 f"👉 <i>Apna official Meesho referral link yahan paste karke bhejein:</i>\n"
                                 f"<i>(Jaise: <code>https://app.meesho.com/2yoV/...</code>)</i>",
                                 reply_markup=cancel_markup,
                             )
                             continue
+
+                        # ── Custom Referral Account Quantity Selected (Buttons) ──
+                        elif cb_data.startswith("cust_qty_"):
+                            ref_price = get_store_referral_price()
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            saved_ref = st.get("temp_custom_ref_link")
+                            if not saved_ref:
+                                await answer_tg_callback(client, cb_id, "⚠️ Referral link missing! Please try again.", show_alert=True)
+                                continue
+
+                            q_param = cb_data.replace("cust_qty_", "").strip()
+                            if q_param == "custom":
+                                st["manual_step"] = "awaiting_cust_custom_qty"
+                                await answer_tg_callback(client, cb_id)
+                                cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                                await send_tg_message(
+                                    client,
+                                    cb_chat_id,
+                                    f"🔢 <b>Custom Referral Quantity Bhejein:</b>\n\n"
+                                    f"Kitne accounts generate karwane hain? Number likhkar bhejein:\n"
+                                    f"• <b>Minimum:</b> 5 Accounts\n"
+                                    f"• <b>Maximum:</b> 20 Accounts\n"
+                                    f"• <b>Price:</b> ₹{ref_price} / Account\n"
+                                    f"<i>(Jaise: <code>5</code>, <code>8</code>, <code>12</code>, <code>20</code>)</i>",
+                                    reply_markup=cancel_markup,
+                                )
+                                continue
+                            elif q_param.isdigit():
+                                qty = int(q_param)
+                                qty = max(5, min(20, qty))
+                                await answer_tg_callback(client, cb_id, f"{qty} accounts selected!")
+                                await create_and_send_buyer_invoice(
+                                    client,
+                                    cb_chat_id,
+                                    cb_user_id,
+                                    cb_from.get("username", ""),
+                                    cb_from.get("first_name", "User"),
+                                    "Custom Referral",
+                                    qty,
+                                    ref_price,
+                                    custom_referral_link=saved_ref,
+                                )
+                                continue
 
                         # ── Buyer Cancel Account Type Selection ──
                         elif cb_data == "cancel_buy_selection":
@@ -4481,6 +4671,7 @@ async def bot_loop():
                     first_name = from_user.get("first_name", "User")
                     username = from_user.get("username", "")
                     text = (msg.get("text") or "").strip()
+                    register_user_activity(chat_id, username, first_name)
                     print(f"[{time.strftime('%H:%M:%S')}] [TG Message] chat_id={chat_id} ({first_name} @{username}) text={repr(text)}", flush=True)
 
                     state = ACTIVE_TASKS.setdefault(chat_id, {"hunting": False, "active_id": None, "stop_flag": False})
@@ -4682,56 +4873,104 @@ async def bot_loop():
                             buyer_ref = text.strip()
                             if buyer_ref.startswith("http://") or buyer_ref.startswith("https://") or "meesho.com" in buyer_ref:
                                 state["manual_step"] = None
+                                state["temp_custom_ref_link"] = buyer_ref
                                 ref_p = get_store_referral_price()
-                                order_id = f"ORD{int(time.time()) % 1000000:06d}"
-                                store_st = load_store_settings()
-                                upi_id = store_st.get("upi_id", "paytmqr28100505010115i3puxb4eoa@paytm")
-                                upi_name = store_st.get("upi_name", "Meesho Store")
 
-                                new_order = {
-                                    "id": order_id,
-                                    "user_id": str(chat_id),
-                                    "username": username,
-                                    "first_name": first_name,
-                                    "amount": ref_p,
-                                    "order_type": "Custom Referral",
-                                    "custom_referral_link": buyer_ref,
-                                    "status": "AWAITING_PAYMENT",
-                                    "created_at": time.time(),
-                                    "utr": None,
-                                }
-                                save_order(new_order)
-                                state["awaiting_utr_order"] = order_id
-
-                                qr_bytes = generate_upi_qr_bytes(upi_id, upi_name, ref_p, order_id)
-                                invoice_caption = (
-                                    f"🧾 <b>MEESHO JSON OFFICIAL INVOICE</b>\n"
+                                qty_prompt = (
+                                    f"🔗 <b>MEESHO REFERRAL LINK SAVED!</b>\n"
+                                    f"<code>{buyer_ref}</code>\n"
                                     f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"🆔 <b>Order ID:</b> <code>#{order_id}</code>\n"
-                                    f"📦 <b>Type:</b> Custom Referral Account\n"
-                                    f"🔗 <b>Attached Refer Link:</b>\n<code>{buyer_ref}</code>\n"
-                                    f"💵 <b>Total Payable:</b> <b>₹{ref_p}</b> (OTP Number + Custom Link)\n"
-                                    f"👤 <b>Payee Name:</b> {upi_name}\n"
-                                    f"📲 <b>UPI ID:</b> <code>{upi_id}</code>\n"
+                                    f"Ab kitne accounts generate karwane hain choose karein:\n\n"
+                                    f"📌 <b>Custom Referral Rules:</b>\n"
+                                    f"• <b>Minimum Order:</b> <b>5 Accounts</b> (Mandatory)\n"
+                                    f"• <b>Maximum Limit:</b> <b>20 Accounts</b> / Order\n"
+                                    f"• <b>Price:</b> <b>₹{ref_p} / Account</b>\n"
                                     f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"📌 <b>PAYMENT STEPS:</b>\n"
-                                    f"1️⃣ Upar diye gaye QR Code ko Paytm / PhonePe / GPay se scan karein.\n"
-                                    f"2️⃣ <b>₹{ref_p}</b> ka exact payment karein.\n"
-                                    f"3️⃣ Payment ke baad <b>12-digit UTR / Ref Number</b> copy karein.\n"
-                                    f"4️⃣ Niche <b>Submit UTR</b> button dabakar ya seedhe yahan UTR likhkar bhejein.\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"⚡ <i>Admin payment verify karte hi aapka fresh account process hona shuru ho jayega!</i>"
+                                    f"👇 <i>Quantity choose karein ya custom number likhein:</i>"
                                 )
-                                qr_inline_kb = {
+                                qty_kb = {
                                     "inline_keyboard": [
-                                        [{"text": "💳 Submit UTR / Ref No", "callback_data": f"submit_utr_{order_id}"}],
-                                        [{"text": "❌ Cancel Order", "callback_data": f"cancel_ord_{order_id}"}],
+                                        [
+                                            {"text": f"5 Accs (₹{5 * ref_p})", "callback_data": "cust_qty_5"},
+                                            {"text": f"10 Accs (₹{10 * ref_p})", "callback_data": "cust_qty_10"},
+                                        ],
+                                        [
+                                            {"text": f"15 Accs (₹{15 * ref_p})", "callback_data": "cust_qty_15"},
+                                            {"text": f"20 Accs (₹{20 * ref_p})", "callback_data": "cust_qty_20"},
+                                        ],
+                                        [
+                                            {"text": "✏️ Enter Custom Quantity (5-20)", "callback_data": "cust_qty_custom"},
+                                        ],
+                                        [
+                                            {"text": "❌ Cancel", "callback_data": "cancel_buy_selection"},
+                                        ]
                                     ]
                                 }
-                                await send_tg_photo(client, chat_id, qr_bytes, caption=invoice_caption, reply_markup=qr_inline_kb)
+                                await send_tg_message(client, chat_id, qty_prompt, reply_markup=qty_kb)
                                 continue
                             else:
                                 await send_tg_message(client, chat_id, "❌ Kripya valid Meesho URL bhejein (jaise: <code>https://app.meesho.com/...</code> ya <code>/cancel</code> bhejein).")
+                                continue
+
+                        # ── Buyer Step: Submitting Custom Standard Quantity ──
+                        elif state.get("manual_step") == "awaiting_std_custom_qty":
+                            std_p = get_store_price()
+                            if text.isdigit():
+                                qty = int(text)
+                                if 1 <= qty <= 20:
+                                    state["manual_step"] = None
+                                    await create_and_send_buyer_invoice(
+                                        client,
+                                        chat_id,
+                                        chat_id,
+                                        username,
+                                        first_name,
+                                        "Standard Fresh",
+                                        qty,
+                                        std_p,
+                                        custom_referral_link=None,
+                                    )
+                                    continue
+                                else:
+                                    await send_tg_message(
+                                        client,
+                                        chat_id,
+                                        f"⚠️ <b>Invalid Quantity:</b> Standard accounts ke liye <b>Minimum 1</b> aur <b>Maximum 20</b> accounts allow hain.\n👉 Kripya 1 se 20 ke beech number bhejein:",
+                                    )
+                                    continue
+                            else:
+                                await send_tg_message(client, chat_id, "❌ Kripya valid number bhejein (jaise: <code>3</code> ya <code>7</code> ya <code>12</code>) ya <code>/cancel</code> karein.")
+                                continue
+
+                        # ── Buyer Step: Submitting Custom Referral Quantity ──
+                        elif state.get("manual_step") == "awaiting_cust_custom_qty":
+                            ref_p = get_store_referral_price()
+                            saved_ref = state.get("temp_custom_ref_link")
+                            if text.isdigit():
+                                qty = int(text)
+                                if 5 <= qty <= 20:
+                                    state["manual_step"] = None
+                                    await create_and_send_buyer_invoice(
+                                        client,
+                                        chat_id,
+                                        chat_id,
+                                        username,
+                                        first_name,
+                                        "Custom Referral",
+                                        qty,
+                                        ref_p,
+                                        custom_referral_link=saved_ref,
+                                    )
+                                    continue
+                                else:
+                                    await send_tg_message(
+                                        client,
+                                        chat_id,
+                                        f"⚠️ <b>Quantity Restriction:</b> Custom referral link use karne par <b>Minimum 5</b> aur <b>Maximum 20</b> accounts zaroori hain!\n👉 Kripya 5 se 20 ke beech number bhejein:",
+                                    )
+                                    continue
+                            else:
+                                await send_tg_message(client, chat_id, "❌ Kripya valid number bhejein (jaise: <code>5</code>, <code>8</code>, <code>15</code>) ya <code>/cancel</code> karein.")
                                 continue
 
                         # ── Buyer Buy Meesho JSON ──
@@ -5079,22 +5318,12 @@ async def bot_loop():
                         else:
                             await send_tg_message(client, chat_id, "⚠️ Usage: <code>/msg &lt;user_id&gt; &lt;your message&gt;</code>")
 
-                    # ── 📢 Broadcast Announcement (/broadcast <message>) ──
-                    elif text.startswith("/broadcast"):
+                    # ── 📢 Broadcast Announcement (/broadcast <message> or '📢 Broadcast') ──
+                    elif text.startswith("/broadcast") or text == "📢 Broadcast":
                         parts = text.split(maxsplit=1)
                         if len(parts) == 2 and len(parts[1].strip()) > 0:
                             bcast_text = parts[1].strip()
-                            all_ords = load_orders()
-                            all_cfgs = load_all_configs()
-                            recipients = set()
-                            for o in all_ords.values():
-                                if o.get("user_id"):
-                                    recipients.add(str(o["user_id"]))
-                            for cid in all_cfgs.keys():
-                                recipients.add(str(cid))
-
-                            if str(ADMIN_CHAT_ID) in recipients:
-                                recipients.remove(str(ADMIN_CHAT_ID))
+                            recipients = get_all_broadcast_recipients()
 
                             if not recipients:
                                 await send_tg_message(client, chat_id, "ℹ️ Koi registered users nahi mile broadcast ke liye.", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
@@ -5129,7 +5358,57 @@ async def bot_loop():
                                 reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
                             )
                         else:
-                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/broadcast &lt;announcement message&gt;</code>")
+                            state["manual_step"] = "awaiting_broadcast_message"
+                            recipients = get_all_broadcast_recipients()
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"📢 <b>BROADCAST TO EVERY USER:</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"👥 <b>Total Target Users:</b> <code>{len(recipients)}</code> users\n\n"
+                                f"👉 <i>Jo announcement message sabhi users ko bhejna hai, yahan type karke bhejein:</i>\n\n"
+                                f"<i>(Text, formatting, links sabhi automatically deliver honge)</i>",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_broadcast_message":
+                        bcast_text = text.strip()
+                        state["manual_step"] = None
+                        recipients = get_all_broadcast_recipients()
+
+                        if not recipients:
+                            await send_tg_message(client, chat_id, "ℹ️ Koi registered users nahi mile broadcast ke liye.", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                            continue
+
+                        await send_tg_message(client, chat_id, f"📢 <b>Broadcasting message to {len(recipients)} users...</b>")
+                        sent_count = 0
+                        fail_count = 0
+
+                        formatted_bcast = (
+                            f"📢 <b>OFFICIAL ANNOUNCEMENT:</b>\n\n"
+                            f"{bcast_text}"
+                        )
+
+                        for uid in recipients:
+                            try:
+                                r_b = await send_tg_message(client, uid, formatted_bcast, reply_markup=USER_MAIN_MENU_KEYBOARD)
+                                if r_b and r_b.get("ok"):
+                                    sent_count += 1
+                                else:
+                                    fail_count += 1
+                                await asyncio.sleep(0.05)
+                            except Exception:
+                                fail_count += 1
+
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            f"✅ <b>Broadcast Complete!</b>\n\n"
+                            f"📤 <b>Successfully Sent:</b> {sent_count}\n"
+                            f"❌ <b>Failed (Blocked):</b> {fail_count}",
+                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                        )
 
                     # ── 💰 Set JSON Price (Admin) ──
                     elif text.startswith("/setprice") or text == "💰 Set JSON Price":
