@@ -75,13 +75,13 @@ CROWSTACK_PROFILES = {
         "sec_ch_ua_mobile": "?0",
         "sec_ch_ua_platform": '"Windows"',
         "x_tg_init_data": (
-            "query_id=AAGvBzYTBAAAAK8HNhOpbRYS&user=%7B%22id%22%3A8912242607%2C"
+            "query_id=AAGvBzYTBAAAAK8HNhP0JMOa&user=%7B%22id%22%3A8912242607%2C"
             "%22first_name%22%3A%22Rem%22%2C%22last_name%22%3A%22%22%2C"
             "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
             "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
             "%2FCzB6ff0QnWjL-1jduLteUDGtPQ_2cw5UV_KgdSt69fDwah01TLx2_AIcKiFqxJey.svg%22%7D"
-            "&auth_date=1790828158&signature=4koLOhqgREiXLHh2DNV78Y5Zq6eI-j1xXk2Aahr8k_NCrG1muMYQMqbJWbkXGPEx2vB2wOw5MF3vSinjGuyaDA"
-            "&hash=e60b39a2423ae534148660905902fb62b524c22d553db4ce2275115e15f72e20"
+            "&auth_date=1791267011&signature=ZfxBlm1N-WlMJS_IaVHwc8XECRdkJ4mZvAk6GAGhwXQ27oJjEnjROyPs38f614IH4mVoS1dbZyJlhVUhe6YsDA"
+            "&hash=227b74bf8371f4b4622526dcff9fc9b0c3ff875e079e5d14f9ab3e6459ea1836"
         ),
     },
     "main": {
@@ -94,14 +94,14 @@ CROWSTACK_PROFILES = {
         "sec_ch_ua_mobile": "?0",
         "sec_ch_ua_platform": '"Windows"',
         "x_tg_init_data": (
-            "query_id=AAEVN7JtAwAAABU3sm34Ixx9&user=%7B%22id%22%3A8282846997%2C"
+            "query_id=AAEVN7JtAwAAABU3sm2RRyPU&user=%7B%22id%22%3A8282846997%2C"
             "%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C"
             "%22username%22%3A%22MarinKitagwa12%22%2C%22language_code%22%3A%22en%22%2C"
             "%22allows_write_to_pm%22%3Atrue%2C"
             "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
             "%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D"
-            "&auth_date=1790153685&signature=A6CBDLO7stjYuzin8d7xqwtvE_ASH4xcqnnwG6uYEY5zIItb7YmJEXRIG47kf3Jkpp4lgYjKNn_qv4EQF3f1BA"
-            "&hash=a1a56dd3657bbccd6d9b4d51fc86fda1611be4329b9a4a3751b3f0dd2b05a9ad"
+            "&auth_date=1791267282&signature=jek5Kw5vBCuMMoDDpnnegR1_gi_sX_HiHKug258EgQfY_RHXXuJfiMr1joAASu0WP5yUajTbXMjKtekEUdvSDA"
+            "&hash=5053843b84afdbae4fd996a83224bcc571329fddfa91a0bd462d995ff26a95be"
         ),
     },
 }
