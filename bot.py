@@ -1267,6 +1267,47 @@ async def otpd_cancel(client: httpx.AsyncClient, api_key: str, act_id: str, phon
     return True
 
 
+async def otpd_buy_multi_server_race(client: httpx.AsyncClient, api_key: str, servers: list[str]) -> dict:
+    """Races multiple servers concurrently in parallel. The fastest server to return a number wins!
+    Any trailing numbers received from other servers in the same race are immediately cancelled/refunded."""
+    if not servers:
+        return {"ok": False, "error": "No servers configured"}
+    if len(servers) == 1:
+        return await otpd_buy(client, api_key, servers[0])
+
+    tasks = [asyncio.create_task(otpd_buy(client, api_key, str(s))) for s in servers]
+    winner = None
+    extra_bought = []
+    errors = []
+
+    for fut in asyncio.as_completed(tasks):
+        try:
+            res = await fut
+            if res.get("ok"):
+                if winner is None:
+                    winner = res
+                else:
+                    extra_bought.append(res)
+            else:
+                errors.append(res.get("error", "Unknown error"))
+        except Exception as e:
+            errors.append(str(e))
+
+    # Cancel any extra numbers bought in the race right away with 0s delay for instant refund
+    if extra_bought:
+        for extra in extra_bought:
+            extra_id = extra.get("id")
+            extra_phone = extra.get("phone", "")
+            if extra_id:
+                asyncio.create_task(otpd_cancel(client, api_key, extra_id, phone=extra_phone, initial_delay=0))
+
+    if winner:
+        return winner
+
+    combined_err = " | ".join(set(errors)) if errors else "NO_NUMBERS"
+    return {"ok": False, "error": combined_err, "server_id": servers[0] if servers else "unknown"}
+
+
 async def otpd_get_sms(client: httpx.AsyncClient, api_key: str, act_id: str) -> dict:
     try:
         r = await client.get(OTP_DOCTOR_BASE, params={"action": "getStatus", "api_key": api_key, "id": act_id}, timeout=10)
@@ -2756,13 +2797,13 @@ async def mine_and_deliver_order(client: httpx.AsyncClient, order_id: str):
     max_attempts = 8
 
     for attempt in range(1, max_attempts + 1):
-        srv = servers[(attempt - 1) % len(servers)]
-        print(f"[OrderDelivery] Attempt #{attempt} for Order {order_id} on Server {srv}...")
+        srv_desc = ", ".join(f"Server {s}" for s in servers)
+        print(f"[OrderDelivery] Attempt #{attempt} for Order {order_id} racing servers [{srv_desc}]...")
 
-        res = await otpd_buy(client, api_key, srv)
+        res = await otpd_buy_multi_server_race(client, api_key, servers)
         if not res.get("ok"):
-            print(f"[OrderDelivery] Buy failed on {srv}: {res.get('error')}")
-            await asyncio.sleep(4)
+            print(f"[OrderDelivery] Buy failed on [{srv_desc}]: {res.get('error')}")
+            await asyncio.sleep(3)
             continue
 
         act_id = res["id"]
@@ -3326,23 +3367,25 @@ async def run_single_key_worker(
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🎯 Target limit of {target_limit} reached! Worker not buying new numbers.")
             break
 
-        current_server = servers[server_idx % len(servers)]
-        server_idx += 1
-
         w_state["attempts"] += 1
         state["attempts"] += 1
         att_num = w_state["attempts"]
-        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Attempt #{att_num}: Buying number from Server {current_server} (Key {key_preview})...")
+        srv_desc = ", ".join(f"Server {s}" for s in servers)
+        if len(servers) > 1:
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Attempt #{att_num}: ⚡ Racing [{srv_desc}] concurrently (Key {key_preview})...")
+        else:
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Attempt #{att_num}: Buying number from Server {servers[0]} (Key {key_preview})...")
 
-        res = await otpd_buy(client, api_key, current_server)
+        res = await otpd_buy_multi_server_race(client, api_key, servers)
+        current_server = res.get("server_id", servers[0])
 
         if not res.get("ok"):
             err = res.get("error", "Unknown error")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Server {current_server} Buy error: {err}")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Buy error on [{srv_desc}]: {err}")
 
             if "NO_BALANCE" in err:
                 w_state["status"] = "Waiting Refund"
-                print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ Low balance (Server {current_server}, Key {key_preview}). Waiting for background cancel refund...")
+                print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ Low balance ({srv_desc}, Key {key_preview}). Waiting for background cancel refund...")
                 refund_done = False
                 for _ in range(5):
                     if state.get("stop_flag") or not state.get("hunting"):
@@ -3378,8 +3421,8 @@ async def run_single_key_worker(
         phone = res["phone"]
         w_state["active_id"] = act_id
         cur_bal = await otpd_balance(client, api_key)
-        await record_transaction("NUMBER_BOUGHT", phone, worker_id, current_server, cur_bal, f"Key: {key_preview}")
-        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Got number: {phone} (ID: {act_id}, Server: {current_server}, Bal: ₹{cur_bal}) — checking registration...")
+        await record_transaction("NUMBER_BOUGHT", phone, worker_id, current_server, cur_bal, f"Key: {key_preview} (Race Win)")
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⚡ Server {current_server} won! Got number: {phone} (ID: {act_id}, Bal: ₹{cur_bal}) — checking registration...")
 
         chk = await check_meesho_reg(client, phone)
         if not chk.get("ok"):
@@ -3647,8 +3690,9 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
         servers = ["5841"]
         update_user_config(chat_id, {"selected_servers": servers})
 
-    servers = servers[:2]
+    servers = servers[:5]
     server_names = ", ".join(f"Server {s}" for s in servers)
+    server_mode_tag = " ⚡ (Parallel Fast Race Mode)" if len(servers) > 1 else ""
 
     if target_limit is None:
         target_limit = int(cfg.get("target_limit", 0))
@@ -3712,7 +3756,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
         f"{limit_label}"
         f"⚡ <b>Active Concurrent Workers:</b> <b>{len(keys)} Parallel Workers</b>\n"
         f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
-        f"🏷️ <b>Selected Servers:</b> <code>{server_names}</code>\n\n"
+        f"🏷️ <b>Selected Servers:</b> <code>{server_names}</code>{server_mode_tag}\n\n"
         f"🔑 <b>Configured API Keys:</b>\n{keys_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>📊 Live stats: <b>/stats</b> | 📋 Summary: <b>/summary</b> | 🛑 Stop: <b>/stop</b></i>",
