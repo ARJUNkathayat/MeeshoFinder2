@@ -467,15 +467,49 @@ ACCOUNTS_LOCK = asyncio.Lock()
 ACCOUNTS_HISTORY_FILE = "accounts_history.json"
 ACCOUNTS_SUMMARY_TXT = os.path.join("accounts", "created_accounts_summary.txt")
 
-
-# ─── Persistent Created Accounts Summary & History ────────────────────────────
-ACCOUNTS_LOCK = asyncio.Lock()
-ACCOUNTS_HISTORY_FILE = "accounts_history.json"
-ACCOUNTS_SUMMARY_TXT = os.path.join("accounts", "created_accounts_summary.txt")
+FAILED_ACCOUNTS_LOCK = asyncio.Lock()
+FAILED_ACCOUNTS_FILE = "failed_accounts_history.json"
+FAILED_ACCOUNTS_TXT = os.path.join("accounts", "failed_accounts_summary.txt")
 
 TRANSACTIONS_LOCK = asyncio.Lock()
 TRANSACTIONS_HISTORY_FILE = "transactions_history.json"
 TRANSACTIONS_LOG_TXT = os.path.join("accounts", "transactions_log.txt")
+
+
+def load_failed_accounts_history() -> list:
+    if os.path.exists(FAILED_ACCOUNTS_FILE):
+        try:
+            with open(FAILED_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_failed_accounts_history(history: list):
+    try:
+        with open(FAILED_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Failed Accounts History Save Error] {e}")
+
+
+async def record_failed_account(phone: str, worker_id: int, server: str, key_preview: str, reason: str):
+    async with FAILED_ACCOUNTS_LOCK:
+        history = load_failed_accounts_history()
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry = {
+            "id": len(history) + 1,
+            "phone": phone,
+            "worker_id": worker_id,
+            "server": str(server),
+            "key_preview": key_preview,
+            "reason": reason,
+            "failed_at": now_str,
+            "timestamp": time.time(),
+        }
+        history.append(entry)
+        save_failed_accounts_history(history)
 
 
 def load_accounts_history() -> list:
@@ -683,15 +717,19 @@ def reset_session_stats(chat_id: int | str):
         state["attempts"] = 0
         state["accounts_created"] = 0
         state["registered_count"] = 0
+        state["failed_creations"] = 0
         state["start_time"] = time.time()
         worker_states = state.get("worker_states", {})
         for w_st in worker_states.values():
             w_st["attempts"] = 0
             w_st["accounts"] = 0
+            w_st["registered"] = 0
+            w_st["failed"] = 0
 
 
 async def reset_today_accounts() -> int:
-    """Removes created account records for today from persistent history."""
+    """Removes created and failed account records for today from persistent history."""
+    deleted_count = 0
     async with ACCOUNTS_LOCK:
         history = load_accounts_history()
         today_prefix = time.strftime("%Y-%m-%d")
@@ -701,25 +739,36 @@ async def reset_today_accounts() -> int:
             it["id"] = idx
         save_accounts_history(remaining)
         regenerate_all_summary_reports()
-        return deleted_count
+    async with FAILED_ACCOUNTS_LOCK:
+        f_history = load_failed_accounts_history()
+        today_prefix = time.strftime("%Y-%m-%d")
+        f_remaining = [x for x in f_history if not str(x.get("failed_at", "")).startswith(today_prefix)]
+        save_failed_accounts_history(f_remaining)
+    return deleted_count
 
 
 async def reset_all_accounts_history() -> int:
-    """Clears all-time created account records and regenerates report files."""
+    """Clears all-time created and failed account records and regenerates report files."""
+    deleted_count = 0
     async with ACCOUNTS_LOCK:
         history = load_accounts_history()
         deleted_count = len(history)
         save_accounts_history([])
         regenerate_all_summary_reports()
-        return deleted_count
+    async with FAILED_ACCOUNTS_LOCK:
+        save_failed_accounts_history([])
+    return deleted_count
 
 
 def generate_accounts_summary_text() -> str:
     history = load_accounts_history()
     tx_history = load_transactions_history()
+    failed_history = load_failed_accounts_history()
     total = len(history)
+    total_failed = len(failed_history)
     today_prefix = time.strftime("%Y-%m-%d")
     today_count = sum(1 for x in history if str(x.get("created_at", "")).startswith(today_prefix))
+    today_failed = sum(1 for x in failed_history if str(x.get("failed_at", "")).startswith(today_prefix))
 
     # Day-wise breakdown
     day_breakdown = get_day_wise_breakdown()
@@ -751,6 +800,16 @@ def generate_accounts_summary_text() -> str:
             )
     recent_text = "\n".join(recent_lines) if recent_lines else "<i>No accounts created yet.</i>"
 
+    # Recent failed accounts snippet
+    recent_failed = failed_history[-4:]
+    recent_failed_lines = []
+    if recent_failed:
+        for f_it in reversed(recent_failed):
+            recent_failed_lines.append(
+                f"• <code>+91{f_it.get('phone')}</code> | W#{f_it.get('worker_id')} (Key: {f_it.get('key_preview', 'N/A')}) | Reason: <code>{str(f_it.get('reason', ''))[:30]}</code> (<i>{str(f_it.get('failed_at', ''))[-8:]}</i>)"
+            )
+    recent_failed_text = "\n".join(recent_failed_lines) if recent_failed_lines else "<i>No failed account creation recorded.</i>"
+
     # Recent transactions snippet
     recent_tx = tx_history[-4:]
     recent_tx_lines = []
@@ -765,11 +824,13 @@ def generate_accounts_summary_text() -> str:
         f"📋 <b>MEESHO MASTER SUMMARY & AUDIT REPORT</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Total Accounts Created:</b> <b>{total}</b>\n"
-        f"📅 <b>Created Today ({today_prefix}):</b> <b>{today_count}</b>\n\n"
+        f"❌ <b>Total Failed Creations:</b> <b>{total_failed}</b>\n"
+        f"📅 <b>Created Today ({today_prefix}):</b> <b>{today_count}</b> (❌ Failed: <b>{today_failed}</b>)\n\n"
         f"🗓️ <b>Day-Wise History:</b>\n{day_history_str}\n\n"
         f"🏷️ <b>Server Breakdown:</b> {srv_breakdown}\n"
         f"⚡ <b>Worker Breakdown:</b> {worker_breakdown}\n\n"
         f"🕒 <b>Latest Created Accounts:</b>\n{recent_text}\n\n"
+        f"⚠️ <b>Recent Failed Creations:</b>\n{recent_failed_text}\n\n"
         f"💳 <b>Recent Wallet / Number Activity:</b>\n{recent_tx_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📁 <i>Niche detailed <b>Master Summary</b>, <b>Per-Worker Summary</b>, aur <b>Transaction Log</b> files attach ki gayi hain.</i>"
@@ -2823,9 +2884,6 @@ async def mine_and_deliver_order(client: httpx.AsyncClient, order_id: str):
                 f"📱 <b>Mined Phone:</b> <code>+91{delivered_phone}</code>\n"
                 f"💰 <b>Amount:</b> ₹{order.get('amount')}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📋 <b>Mined JSON Data:</b>\n"
-                f"<pre><code>{account_json_str[:3000]}</code></pre>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"👉 <b>Choose Delivery Action:</b>\n"
                 f"• <b>Send This JSON:</b> Yahi mined account buyer ko deliver karein.\n"
                 f"• <b>Custom JSON / File:</b> Apni koi dusri JSON file ya text bhejein (/deliver {order_id})."
@@ -2952,9 +3010,12 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
     server_names = ", ".join(f"Server {s}" for s in sel_servers)
 
     history = load_accounts_history()
+    failed_history = load_failed_accounts_history()
     total_all_time = len(history)
+    all_time_failed = len(failed_history)
     today_prefix = time.strftime("%Y-%m-%d")
     today_count = sum(1 for x in history if str(x.get("created_at", "")).startswith(today_prefix))
+    today_failed = sum(1 for x in failed_history if str(x.get("failed_at", "")).startswith(today_prefix))
 
     # Day-wise aggregate
     day_counts = {}
@@ -2980,19 +3041,85 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
     total_bal = sum(parse_balance_float(v) for v in balances_dict.values())
 
     is_running = state.get("hunting", False)
+
+    # Compile per-key performance & stats
+    key_stats = []
+    for idx, k in enumerate(keys, start=1):
+        masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
+        bal = parse_balance_float(balances_dict.get(k, "0.00"))
+        w_st = state.get("worker_states", {}).get(idx, {}) if is_running else {}
+        session_created = w_st.get("accounts", 0)
+        session_failed = w_st.get("failed", 0)
+        session_att = w_st.get("attempts", 0)
+        w_status = w_st.get("status", "Running" if is_running else "Idle")
+
+        all_created = sum(1 for x in history if x.get("key_preview") == masked or (x.get("worker_id") == idx and not x.get("key_preview")))
+        all_failed = sum(1 for x in failed_history if x.get("key_preview") == masked or (x.get("worker_id") == idx and not x.get("key_preview")))
+        today_created = sum(1 for x in history if (x.get("key_preview") == masked or (x.get("worker_id") == idx and not x.get("key_preview"))) and str(x.get("created_at", "")).startswith(today_prefix))
+
+        key_stats.append({
+            "idx": idx,
+            "key": k,
+            "masked": masked,
+            "balance": bal,
+            "session_created": session_created,
+            "session_failed": session_failed,
+            "session_att": session_att,
+            "all_created": all_created,
+            "all_failed": all_failed,
+            "today_created": today_created,
+            "status": w_status,
+        })
+
+    # Find Top Performing API Key (Ranked by accounts created)
+    if is_running:
+        sorted_keys = sorted(key_stats, key=lambda x: (x["session_created"], x["today_created"], x["all_created"], x["balance"]), reverse=True)
+    else:
+        sorted_keys = sorted(key_stats, key=lambda x: (x["today_created"], x["all_created"], x["balance"]), reverse=True)
+
+    top_key = sorted_keys[0] if sorted_keys else None
+    top_recommendation = ""
+    if top_key:
+        active_cnt = top_key["session_created"] if is_running else top_key["today_created"]
+        total_cnt = top_key["all_created"]
+        fail_cnt = top_key["session_failed"] if is_running else top_key["all_failed"]
+        t_bal = top_key["balance"]
+        if active_cnt > 0 or total_cnt > 0:
+            if t_bal < 20.0:
+                bal_alert = f"⚠️ <b>LOW BALANCE ALERT:</b> Is key se sabse zyada accounts ban rahe hain, lekin balance sirf <b>₹{t_bal:.2f}</b> bacha hai! Jaldi balance add karein taaki hunting ruke na."
+            elif t_bal < 40.0:
+                bal_alert = f"ℹ️ <b>Balance Moderate:</b> ₹{t_bal:.2f} available. Top-up add kar sakte hain."
+            else:
+                bal_alert = f"✅ <b>Balance Healthy:</b> ₹{t_bal:.2f} available."
+
+            period_label = f"Session: {active_cnt} Created" if is_running else f"Today: {active_cnt} Created"
+            top_recommendation = (
+                f"🏆 <b>SABSE ZYADA ACCOUNTS BANE WALI KEY:</b>\n"
+                f"👑 <b>Key #{top_key['idx']} (<code>{top_key['masked']}</code>)</b>\n"
+                f"📈 <b>Stats:</b> {period_label} | Total: {total_cnt} | Failed: {fail_cnt}\n"
+                f"💰 <b>Current Balance:</b> <b>₹{t_bal:.2f}</b>\n"
+                f"{bal_alert}\n\n"
+            )
+
     if is_running:
         runtime_mins = int((time.time() - state.get("start_time", time.time())) // 60)
         worker_lines = []
-        max_disp = min(10, len(keys))
-        for idx in range(1, max_disp + 1):
-            k = keys[idx - 1]
-            w_st = state.get("worker_states", {}).get(idx, {})
-            w_bal = parse_balance_float(balances_dict.get(k, "0.00"))
+        max_disp = min(10, len(key_stats))
+        for it in key_stats[:max_disp]:
+            idx = it["idx"]
+            masked = it["masked"]
+            bal = it["balance"]
+            s_c = it["session_created"]
+            s_f = it["session_failed"]
+            att = it["session_att"]
+            st_text = it["status"]
+            bal_tag = " ⚠️ Low Bal" if bal < 20.0 else ""
+            rank_badge = "👑 " if top_key and top_key["idx"] == idx and (s_c > 0 or it["all_created"] > 0) else ""
             worker_lines.append(
-                f"• <b>Worker #{idx} ({k[:4]}...{k[-4:]})</b>: <code>{w_st.get('status', 'Running')}</code> | Att: {w_st.get('attempts', 0)} | Created: {w_st.get('accounts', 0)} | Bal: ₹{w_bal:.2f}"
+                f"• {rank_badge}<b>Worker #{idx} ({masked})</b>: <code>{st_text}</code> | Att: {att} | Created: <b>{s_c}</b> | Failed: <b>{s_f}</b> | Bal: ₹{bal:.2f}{bal_tag}"
             )
-        if len(keys) > max_disp:
-            worker_lines.append(f"• <i>... and {len(keys) - max_disp} more workers active</i>")
+        if len(key_stats) > max_disp:
+            worker_lines.append(f"• <i>... aur {len(key_stats) - max_disp} more workers active</i>")
         w_details = "\n".join(worker_lines) if worker_lines else "<i>No active workers</i>"
 
         stats_text = (
@@ -3003,25 +3130,34 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             f"🏷️ <b>Active Servers:</b> <code>{server_names}</code>\n\n"
             f"📅 <b>DAY-WISE CREATED ACCOUNTS:</b>\n"
             f"{day_history_str}\n"
-            f"📊 <b>Total All-Time Accounts:</b> <b>{total_all_time}</b>\n\n"
+            f"📊 <b>Total All-Time:</b> <b>{total_all_time} Created</b> (❌ {all_time_failed} Failed)\n"
+            f"📅 <b>Today's Total:</b> <b>{today_count} Created</b> (❌ {today_failed} Failed)\n\n"
             f"🔄 <b>Session Attempts:</b> {state.get('attempts', 0)}\n"
             f"❌ <b>Registered Numbers Cancelled:</b> {state.get('registered_count', 0)}\n"
             f"🎉 <b>Session Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
+            f"⚠️ <b>Session Account Creation Failed:</b> <b>{state.get('failed_creations', 0)}</b>\n"
             f"💵 <b>Total Pool Wallet:</b> <b>₹{total_bal:.2f}</b>\n\n"
-            f"⚡ <b>Per-Worker Live Performance:</b>\n{w_details}\n"
+            f"{top_recommendation}"
+            f"⚡ <b>Per-Worker Performance & Balances:</b>\n{w_details}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👇 <i>Niche button dabakar live refresh ya counter reset karein:</i>"
         )
     else:
         key_balances = []
-        max_disp = min(10, len(keys))
-        for idx in range(1, max_disp + 1):
-            k = keys[idx - 1]
-            bal = parse_balance_float(balances_dict.get(k, "0.00"))
-            masked = k[:4] + "..." + k[-4:] if len(k) >= 8 else k
-            key_balances.append(f"• <b>Key #{idx} ({masked}):</b> ₹{bal:.2f}")
-        if len(keys) > max_disp:
-            key_balances.append(f"• <i>... and {len(keys) - max_disp} more keys configured</i>")
+        max_disp = min(10, len(key_stats))
+        for it in key_stats[:max_disp]:
+            idx = it["idx"]
+            masked = it["masked"]
+            bal = it["balance"]
+            a_c = it["all_created"]
+            a_f = it["all_failed"]
+            bal_tag = " ⚠️ Low Bal" if bal < 20.0 else ""
+            rank_badge = "👑 " if top_key and top_key["idx"] == idx and a_c > 0 else ""
+            key_balances.append(
+                f"• {rank_badge}<b>Key #{idx} ({masked}):</b> ₹{bal:.2f} | Created: <b>{a_c}</b> | Failed: <b>{a_f}</b>{bal_tag}"
+            )
+        if len(key_stats) > max_disp:
+            key_balances.append(f"• <i>... aur {len(key_stats) - max_disp} more keys configured</i>")
         k_bal_str = "\n".join(key_balances) if key_balances else "<i>No keys configured</i>"
 
         stats_text = (
@@ -3032,10 +3168,13 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             f"🏷️ <b>Configured Servers:</b> <code>{server_names}</code>\n\n"
             f"📅 <b>DAY-WISE CREATED ACCOUNTS:</b>\n"
             f"{day_history_str}\n"
-            f"📊 <b>Total All-Time Accounts:</b> <b>{total_all_time}</b>\n\n"
+            f"📊 <b>Total All-Time:</b> <b>{total_all_time} Created</b> (❌ {all_time_failed} Failed)\n"
+            f"📅 <b>Today's Total:</b> <b>{today_count} Created</b> (❌ {today_failed} Failed)\n\n"
             f"🔄 <b>Last Session Attempts:</b> {state.get('attempts', 0) if state else 0}\n"
-            f"🎉 <b>Last Session Created:</b> {state.get('accounts_created', 0) if state else 0}\n\n"
-            f"💰 <b>Key Balances:</b>\n{k_bal_str}\n"
+            f"🎉 <b>Last Session Created:</b> {state.get('accounts_created', 0) if state else 0}\n"
+            f"⚠️ <b>Last Session Failed:</b> {state.get('failed_creations', 0) if state else 0}\n\n"
+            f"{top_recommendation}"
+            f"💰 <b>Key Performance & Balances:</b>\n{k_bal_str}\n"
             f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👇 <i>Niche button dabakar live refresh ya counter reset karein:</i>"
@@ -3288,15 +3427,20 @@ async def run_single_key_worker(
         otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id, worker_id=worker_id, server=current_server)
         if not otp_res.get("ok"):
             err_str = otp_res.get("error", "Failed")
+            w_state["failed"] = w_state.get("failed", 0) + 1
+            state["failed_creations"] = state.get("failed_creations", 0) + 1
+            await record_failed_account(phone, worker_id, current_server, key_preview, f"OTP Send Failed: {err_str}")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ OTP send failed: {err_str}. Queued cancel for refund...")
             cur_bal = await otpd_balance(client, api_key)
             await record_transaction("OTP_SEND_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_str)
             await send_tg_message(
                 client,
                 chat_id,
-                f"❌ <b>[OTP Dispatch Failed]</b>\n"
-                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id})\n"
-                f"⚠️ <b>Error:</b> <code>{err_str}</code>\n"
+                f"❌ <b>[Account Creation Failed — OTP Dispatch]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
+                f"⚠️ <b>Reason:</b> <code>{err_str}</code>\n"
+                f"📊 <b>Total Failed in Session:</b> <b>{state.get('failed_creations', 0)}</b>\n"
                 f"🔄 Number cancel & refund queued.",
             )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
@@ -3339,15 +3483,21 @@ async def run_single_key_worker(
             await asyncio.sleep(2)
 
         if not otp_code:
+            w_state["failed"] = w_state.get("failed", 0) + 1
+            state["failed_creations"] = state.get("failed_creations", 0) + 1
+            await record_failed_account(phone, worker_id, current_server, key_preview, "SMS Timeout (2 Mins Elapsed)")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone} (2 mins elapsed). Sending cancel request...")
             cur_bal = await otpd_balance(client, api_key)
             await record_transaction("SMS_TIMEOUT_CANCEL", phone, worker_id, current_server, cur_bal, "2-min Timeout")
             await send_tg_message(
                 client,
                 chat_id,
-                f"⏰ <b>[SMS Timeout (2 Mins Elapsed)]</b>\n"
-                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id})\n"
-                f"⚠️ OTP Doctor se koi SMS nahi aaya. Number cancel & refund queued.",
+                f"⏰ <b>[Account Creation Failed — SMS Timeout]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
+                f"⚠️ <b>Reason:</b> OTP Doctor se 2 min me SMS nahi aaya.\n"
+                f"📊 <b>Total Failed in Session:</b> <b>{state.get('failed_creations', 0)}</b>\n"
+                f"🔄 Number cancel & refund queued.",
             )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
             w_state["active_id"] = None
@@ -3401,20 +3551,28 @@ async def run_single_key_worker(
             target_limit = state.get("target_limit", 0)
             target_info = f" | 🎯 Target: <b>{state['accounts_created']}/{target_limit}</b>" if target_limit > 0 else ""
 
+            # Key balance & performance insight
+            key_bal_f = parse_balance_float(cur_bal)
+            key_acc_cnt = w_state.get("accounts", 0)
+            key_fail_cnt = w_state.get("failed", 0)
+            if key_bal_f < 20.0:
+                key_bal_alert = f"\n⚠️ <b>Key Balance Alert:</b> ₹{key_bal_f:.2f} bacha hai! (Is key se accounts ban rahe hain, please top up karein!)"
+            else:
+                key_bal_alert = f"\n💳 <b>Key Balance:</b> ₹{key_bal_f:.2f}"
+
             account_msg = (
                 f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
                 f"🎉 <b>MEESHO ACCOUNT CREATED SUCCESSFULLY!</b>\n"
-                f"🏆 <b>Aaj Ka {today_ordinal} Fresh JSON!</b> (Date: <code>{today_prefix}</code>)\n"
+                f"🏆 <b>Aaj Ka {today_ordinal} Fresh Account!</b> (Date: <code>{today_prefix}</code>)\n"
                 f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n\n"
                 f"📱 <b>Mobile Number:</b> <code>+91 {phone}</code>\n"
                 f"👤 <b>Meesho User ID:</b> <code>{user_id}</code>\n"
                 f"⚡ <b>Mined By:</b> <code>Worker #{worker_id}</code> (Key: <code>{key_preview}</code>)\n"
+                f"🔑 <b>Key Performance:</b> <b>{key_acc_cnt} Created</b> | {key_fail_cnt} Failed{key_bal_alert}\n"
                 f"🏷️ <b>Server:</b> <code>Server {current_server}</code>\n"
-                f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime: <b>#{lifetime_total}</b>{target_info}{store_tag}\n\n"
-                f"📋 <b>Account JSON Data:</b>\n"
-                f"<pre><code>{json_str}</code></pre>\n"
+                f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime: <b>#{lifetime_total}</b>{target_info}{store_tag}\n"
                 f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
-                f"📁 <i>Niche official <code>meesho_{phone}.json</code> file attach ki gayi hai.</i>"
+                f"📁 <i>Official JSON file <code>meesho_{phone}.json</code> niche attach ki gayi hai.</i>"
             )
             await send_tg_message(client, chat_id, account_msg)
 
@@ -3423,7 +3581,7 @@ async def run_single_key_worker(
                 chat_id,
                 filename=f"meesho_{phone}.json",
                 content=json_str,
-                caption=f"✅ Meesho Account (+91{phone}) — Aaj Ka #{today_count} JSON | Worker #{worker_id}",
+                caption=f"✅ Meesho Account (+91{phone}) — Aaj Ka #{today_count} Account | Worker #{worker_id}",
             )
 
             # Check if target reached
@@ -3434,16 +3592,20 @@ async def run_single_key_worker(
             w_state["active_id"] = None
         else:
             err_msg = login_res.get("error", "Login failed")
+            w_state["failed"] = w_state.get("failed", 0) + 1
+            state["failed_creations"] = state.get("failed_creations", 0) + 1
+            await record_failed_account(phone, worker_id, current_server, key_preview, f"Meesho Login Verify Failed: {err_msg}")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Meesho login failed: {err_msg}. Queued cancel...")
             cur_bal = await otpd_balance(client, api_key)
             await record_transaction("LOGIN_FAILED_CANCEL", phone, worker_id, current_server, cur_bal, err_msg)
             await send_tg_message(
                 client,
                 chat_id,
-                f"❌ <b>[Account Creation Failed]</b>\n"
+                f"❌ <b>[Account Creation Failed — Login Verify]</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id})\n"
+                f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
                 f"⚠️ <b>Reason:</b> <code>{err_msg}</code>\n"
+                f"📊 <b>Total Failed in Session:</b> <b>{state.get('failed_creations', 0)}</b>\n"
                 f"🔄 Number cancel & refund ho gaya.",
             )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
@@ -3496,6 +3658,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
     state["attempts"] = 0
     state["registered_count"] = 0
     state["accounts_created"] = 0
+    state["failed_creations"] = 0
     state["start_time"] = time.time()
     state["worker_states"] = {}
     state["stop_flag"] = False
@@ -3530,6 +3693,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
             "attempts": 0,
             "accounts": 0,
             "registered": 0,
+            "failed": 0,
             "status": "Starting",
             "key_preview": masked,
             "api_key": key,
@@ -3578,7 +3742,7 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
         w_st = state["worker_states"].get(idx, {})
         w_bal = final_bal_map.get(key, "0.00")
         final_worker_lines.append(
-            f"• <b>Worker #{idx} ({w_st.get('key_preview', '')}):</b> {w_st.get('attempts', 0)} attempts | {w_st.get('accounts', 0)} created | Bal: ₹{w_bal}"
+            f"• <b>Worker #{idx} ({w_st.get('key_preview', '')}):</b> {w_st.get('attempts', 0)} att | {w_st.get('accounts', 0)} created | {w_st.get('failed', 0)} failed | Bal: ₹{w_bal}"
         )
     if len(keys) > 8:
         final_worker_lines.append(f"<i>... aur {len(keys)-8} workers ki detail report /summary me dekhein.</i>")
@@ -3600,7 +3764,8 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
         f"⏱️ <b>Total Runtime:</b> {total_time_mins} minutes\n"
         f"🔄 <b>Total Combined Attempts:</b> {state.get('attempts', 0)}\n"
         f"❌ <b>Registered Cancelled:</b> {state.get('registered_count', 0)}\n"
-        f"🎉 <b>Total Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n\n"
+        f"🎉 <b>Total Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
+        f"⚠️ <b>Total Failed Creations:</b> <b>{state.get('failed_creations', 0)}</b>\n\n"
         f"📊 <b>Per-Worker Performance:</b>\n{w_summary}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Summary report dekhne ke liye <b>/summary</b> dabayein.\nDobara chalane ke liye <b>🚀 Start Hunt</b>.</i>",
@@ -3755,16 +3920,14 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
         account_msg = (
             f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
             f"🎉 <b>MEESHO ACCOUNT CREATED SUCCESSFULLY!</b>\n"
-            f"🏆 <b>Aaj Ka {today_ordinal} Fresh JSON!</b> (Date: <code>{today_prefix}</code>)\n"
+            f"🏆 <b>Aaj Ka {today_ordinal} Fresh Account!</b> (Date: <code>{today_prefix}</code>)\n"
             f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n\n"
             f"📱 <b>Mobile Number:</b> <code>+91 {phone}</code>\n"
             f"👤 <b>Meesho User ID:</b> <code>{user_id}</code>\n"
             f"🏷️ <b>Account Type:</b> {'Old User (Existing)' if is_reg else 'Fresh Unregistered'}{store_tag}\n"
-            f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime Total: <b>#{lifetime_total}</b>\n\n"
-            f"📋 <b>Account JSON Data:</b>\n"
-            f"<pre><code>{json_str}</code></pre>\n"
+            f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime Total: <b>#{lifetime_total}</b>\n"
             f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
-            f"📁 <i>Niche official <code>meesho_{phone}.json</code> file attach ki gayi hai.</i>"
+            f"📁 <i>Official JSON file <code>meesho_{phone}.json</code> niche attach ki gayi hai.</i>"
         )
         await send_tg_message(client, chat_id, account_msg, reply_markup=MAIN_MENU_KEYBOARD)
 
