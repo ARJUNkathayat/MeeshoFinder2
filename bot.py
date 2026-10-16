@@ -1209,12 +1209,30 @@ async def send_tg_message(client: httpx.AsyncClient, chat_id: int | str, text: s
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    try:
-        r = await client.post(url, json=payload, timeout=15)
-        return r.json()
-    except Exception as e:
-        print(f"[TG Error] send_tg_message: {e}")
-        return None
+
+    for attempt in range(4):
+        try:
+            r = await client.post(url, json=payload, timeout=15)
+            data = r.json()
+            if r.status_code == 429:
+                wait_sec = data.get("parameters", {}).get("retry_after", 3)
+                print(f"[TG 429 FloodWait] Telegram requested wait of {wait_sec}s. Backing off (attempt #{attempt + 1})...")
+                await asyncio.sleep(wait_sec + 0.5)
+                continue
+            elif r.status_code == 400 and "can't parse entities" in (data.get("description") or "").lower():
+                # HTML entity error fallback: send plain text
+                plain_payload = dict(payload)
+                plain_payload.pop("parse_mode", None)
+                r_plain = await client.post(url, json=plain_payload, timeout=15)
+                return r_plain.json()
+            return data
+        except Exception as e:
+            if attempt < 3:
+                await asyncio.sleep(1.0)
+            else:
+                print(f"[TG Error] send_tg_message: {e}")
+                return None
+    return None
 
 
 async def send_tg_document(client: httpx.AsyncClient, chat_id: int | str, filename: str, content: str | bytes, caption: str = ""):
@@ -1223,12 +1241,29 @@ async def send_tg_document(client: httpx.AsyncClient, chat_id: int | str, filena
         content = content.encode("utf-8")
     files = {"document": (filename, content, "application/json")}
     data = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
-    try:
-        r = await client.post(url, data=data, files=files, timeout=25.0)
-        return r.json()
-    except Exception as e:
-        print(f"[TG Error] send_tg_document: {e}")
-        return None
+
+    for attempt in range(4):
+        try:
+            r = await client.post(url, data=data, files=files, timeout=25.0)
+            res_data = r.json()
+            if r.status_code == 429:
+                wait_sec = res_data.get("parameters", {}).get("retry_after", 3)
+                print(f"[TG 429 FloodWait Document] Sleeping {wait_sec}s before retrying document delivery...")
+                await asyncio.sleep(wait_sec + 0.5)
+                continue
+            elif r.status_code == 400 and "can't parse entities" in (res_data.get("description") or "").lower():
+                plain_data = dict(data)
+                plain_data.pop("parse_mode", None)
+                r_plain = await client.post(url, data=plain_data, files=files, timeout=25.0)
+                return r_plain.json()
+            return res_data
+        except Exception as e:
+            if attempt < 3:
+                await asyncio.sleep(1.0)
+            else:
+                print(f"[TG Error] send_tg_document: {e}")
+                return None
+    return None
 
 
 async def send_tg_photo(client: httpx.AsyncClient, chat_id: int | str, photo_bytes: bytes, caption: str = "", reply_markup=None):
@@ -2013,18 +2048,6 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
             prof_name = p_info["name"]
             print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] Trying {prof_name} for +91{phone}...")
 
-            if chat_id:
-                await send_tg_message(
-                    client,
-                    chat_id,
-                    f"📤 <b>[Crowstack Call] send-otp</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📱 <b>Number:</b> <code>+91{phone}</code>\n"
-                    f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
-                    f"🔗 <b>Ref Link:</b> <code>{cur_ref or 'None'}</code>\n"
-                    f"⏳ <i>Sending request to Crowstack...</i>",
-                )
-
             headers = get_crowstack_headers(chat_id)
             headers["User-Agent"] = p_info["user_agent"]
             headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
@@ -2036,7 +2059,7 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
                 f"{CROWSTACK_BASE}/send-otp",
                 headers=headers,
                 json=payload,
-                timeout=15,
+                timeout=25,
             )
             raw_text = resp.text.strip()
             data = None
@@ -2047,18 +2070,6 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
 
             if resp.status_code == 200 and data and data.get("ok"):
                 print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] ✅ OTP sent successfully using {prof_name}!")
-                if chat_id:
-                    resp_preview = json.dumps(data, indent=2)[:600]
-                    await send_tg_message(
-                        client,
-                        chat_id,
-                        f"✅ <b>[Crowstack Response] send-otp SUCCESS!</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📊 <b>HTTP Status:</b> <code>{resp.status_code}</code>\n"
-                        f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
-                        f"📥 <b>Response Body:</b>\n<pre><code>{resp_preview}</code></pre>\n"
-                        f"⏳ <i>Ab OTP Doctor se SMS aane ka wait kiya jaa raha hai...</i>",
-                    )
                 return {
                     "ok": True,
                     "method": "crowstack",
@@ -2148,24 +2159,13 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                 headers["sec-ch-ua"] = p_info["sec_ch_ua"]
                 headers["sec-ch-ua-platform"] = p_info.get("sec_ch_ua_platform", '"Windows"')
 
-                if cid:
-                    await send_tg_message(
-                        client,
-                        cid,
-                        f"🔐 <b>[Crowstack Call] verify</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
-                        f"🔢 <b>OTP Code:</b> <code>{otp}</code>\n"
-                        f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
-                        f"⏳ <i>Verifying login on Crowstack...</i>",
-                    )
-
                 payload = {"otp": otp}
+                print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] Verifying OTP {otp} for +91{phone} via {prof_name}...")
                 resp = await client.post(
                     f"{CROWSTACK_BASE}/verify",
                     headers=headers,
                     json=payload,
-                    timeout=15,
+                    timeout=25,
                 )
                 raw_text = resp.text.strip()
                 data = None
@@ -2176,28 +2176,13 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
 
                 if resp.status_code == 200 and data and data.get("ok"):
                     acc = data.get("account", {})
-                    if cid:
-                        resp_preview = json.dumps(data, indent=2)[:600]
-                        await send_tg_message(
-                            client,
-                            cid,
-                            f"✅ <b>[Crowstack Response] verify SUCCESS!</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"📊 <b>HTTP Status:</b> <code>{resp.status_code}</code>\n"
-                            f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
-                            f"📥 <b>Account Details:</b>\n<pre><code>{resp_preview}</code></pre>",
-                        )
+                    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] ✅ Verify SUCCESS via {prof_name} for +91{phone}!")
 
                     # Call Crowstack Export File API right after account creation
                     try:
-                        if cid:
-                            await send_tg_message(client, cid, f"📁 <b>[Crowstack Call] export_file</b> (fetching session tokens & JSON)...")
                         exp_res = await crowstack_export_file(client, cid)
                         if exp_res.get("ok"):
                             exp_data = exp_res.get("data")
-                            if cid:
-                                exp_preview = json.dumps(exp_data, indent=2)[:400] if isinstance(exp_data, dict) else str(exp_res.get("text", ""))[:400]
-                                await send_tg_message(client, cid, f"✅ <b>[Crowstack Response] export_file SUCCESS!</b>\n<pre><code>{exp_preview}</code></pre>")
                             if isinstance(exp_data, dict):
                                 for k, v in exp_data.items():
                                     if k not in acc or not acc[k]:
