@@ -126,6 +126,28 @@ SPEEDZ_BASE_URL = "https://tubesave.in/api/v1"
 DEFAULT_SPEEDZ_KEY = os.getenv("SPEEDZ_API_KEY", "AK_CAlD5Tt-jLsQOX_Jq0t70jtQ57yEOmfY").strip()
 SPEEDZ_LAST_USED = {}  # {api_key: timestamp}
 SPEEDZ_LOCK = asyncio.Lock()
+SAVED_SPEEDZ_KEYS_FILE = "saved_speedz_keys.json"
+
+
+def load_saved_speedz_keys_global() -> list[str]:
+    keys = []
+    if os.path.exists(SAVED_SPEEDZ_KEYS_FILE):
+        try:
+            with open(SAVED_SPEEDZ_KEYS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    keys.extend([k.strip() for k in data if isinstance(k, str) and len(k.strip()) >= 15])
+        except Exception:
+            pass
+    return keys
+
+
+def save_saved_speedz_keys_global(keys: list[str]):
+    try:
+        with open(SAVED_SPEEDZ_KEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump(keys, f, indent=2)
+    except Exception as e:
+        print(f"[SavedSpeedzKeys Save Error] {e}")
 
 
 def get_speedz_keys_pool(chat_id: int | str = None) -> list[str]:
@@ -135,9 +157,16 @@ def get_speedz_keys_pool(chat_id: int | str = None) -> list[str]:
         cfg = get_user_config(chat_id)
         u_keys = cfg.get("speedz_keys", [])
         if isinstance(u_keys, list):
-            pool.extend([k.strip() for k in u_keys if k and isinstance(k, str) and k.strip()])
+            pool.extend([k.strip() for k in u_keys if k and isinstance(k, str) and len(k.strip()) >= 15])
+
+    # Merge persistent global saved speedz keys
+    for gk in load_saved_speedz_keys_global():
+        if gk not in pool:
+            pool.append(gk)
+
     if DEFAULT_SPEEDZ_KEY and DEFAULT_SPEEDZ_KEY not in pool:
         pool.append(DEFAULT_SPEEDZ_KEY)
+
     # Filter uniques while preserving order
     seen = set()
     res = []
@@ -146,6 +175,61 @@ def get_speedz_keys_pool(chat_id: int | str = None) -> list[str]:
             seen.add(k)
             res.append(k)
     return res
+
+
+def build_speedz_settings_message_and_markup(chat_id: int | str = None) -> tuple[str, dict]:
+    sp_keys = get_speedz_keys_pool(chat_id)
+    total_keys = len(sp_keys)
+    capacity_min = total_keys * 12
+    lines = [
+        "⚡ <b>SPEEDZ CHECKER KEYS & LOAD BALANCER</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🔑 <b>Active Keys in Pool:</b> <b>{total_keys} Keys</b>",
+        f"🚀 <b>Check Capacity:</b> ~<b>{capacity_min} checks/minute</b> (1 req/5s per key)",
+        f"🛡️ <b>Rate Limit Bypass:</b> <code>Active (Round-Robin Auto-Rotation)</code>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for s_idx, s_k in enumerate(sp_keys, start=1):
+        masked_s = s_k[:8] + "..." + s_k[-6:] if len(s_k) > 14 else s_k
+        last_u = SPEEDZ_LAST_USED.get(s_k, 0.0)
+        time_ago = f"{int(time.time() - last_u)}s ago" if last_u > 0 else "Ready"
+        lines.append(f"{s_idx}. <code>{masked_s}</code> (Status: {time_ago})")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("👇 <i>Niche button se ek sath multiple keys add karein ya file export karein:</i>")
+
+    markup = {
+        "inline_keyboard": [
+            [
+                {"text": "➕ Add Speedz Keys (Bulk)", "callback_data": "add_speedz_prompt"},
+                {"text": "📥 Export Speedz Keys (.txt)", "callback_data": "export_speedz_keys"},
+            ],
+            [
+                {"text": "🗑️ Clear Custom Keys", "callback_data": "clear_speedz_prompt"},
+                {"text": "🔙 Back to Store Settings", "callback_data": "open_settings_menu"},
+            ]
+        ]
+    }
+    return "\n".join(lines), markup
+
+
+async def handle_export_speedz_keys(client: httpx.AsyncClient, target_chat_id: int | str):
+    sp_keys = get_speedz_keys_pool(target_chat_id)
+    if not sp_keys:
+        await send_tg_message(client, target_chat_id, "⚠️ Koi Speedz keys configured nahi hain!")
+        return
+    txt_content = "\n".join(sp_keys)
+    await send_tg_document(
+        client,
+        target_chat_id,
+        filename=f"speedz_keys_backup_{len(sp_keys)}_keys.txt",
+        content=txt_content,
+        caption=(
+            f"⚡ <b>Speedz Checker Keys Backup:</b> <code>{len(sp_keys)}</code> keys exported.\n"
+            f"📊 <b>Total Capacity:</b> ~<code>{len(sp_keys) * 12}</code> checks/minute\n"
+            f"<i>(Direct backup file saved across server restarts)</i>"
+        ),
+    )
 
 
 async def get_next_available_speedz_key(chat_id: int | str = None) -> tuple[str | None, float]:
@@ -2988,7 +3072,7 @@ async def mine_and_deliver_order(client: httpx.AsyncClient, order_id: str):
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━",
                     )
                     break
-            await asyncio.sleep(3)
+            await asyncio.sleep(0.3)
 
         if not otp_code:
             print(f"[OrderDelivery] SMS timeout for {phone}. Cancelling...")
@@ -3649,7 +3733,7 @@ async def run_single_key_worker(
                         f"⚡ <i>Ab Crowstack login verify call ki jaa rahi hai...</i>",
                     )
                     break
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.3)
 
         if not otp_code:
             w_state["failed"] = w_state.get("failed", 0) + 1
@@ -4863,6 +4947,13 @@ async def bot_loop():
                                         {"text": "👤 Crowstack Session / Identity", "callback_data": "open_identity_menu"},
                                     ],
                                     [
+                                        {"text": "⚡ Speedz Keys & Load Balancer", "callback_data": "open_speedz_menu"},
+                                    ],
+                                    [
+                                        {"text": "➕ Add Speedz Keys (Bulk)", "callback_data": "add_speedz_prompt"},
+                                        {"text": "📥 Export Speedz (.txt)", "callback_data": "export_speedz_keys"},
+                                    ],
+                                    [
                                         {"text": "🔗 Change Referral Link", "callback_data": "set_ref_link"},
                                     ],
                                     [
@@ -4872,6 +4963,53 @@ async def bot_loop():
                                 ]
                             }
                             await send_tg_message(client, cb_chat_id, settings_text, reply_markup=settings_kb)
+                            continue
+
+                        elif cb_data == "open_speedz_menu":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id)
+                            sp_text, sp_kb = build_speedz_settings_message_and_markup(cb_chat_id)
+                            await send_tg_message(client, cb_chat_id, sp_text, reply_markup=sp_kb)
+                            continue
+
+                        elif cb_data == "add_speedz_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_speedz_bulk"
+                            await answer_tg_callback(client, cb_id)
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                "⚡ <b>Speedz Checker API Keys Bhejein:</b>\n\n"
+                                "👉 <i>Ek sath multiple keys paste kar sakte hain (space, comma, newline ya .txt file bhej sakte hain).\n"
+                                "Example: <code>AK_xxx AK_yyy AK_zzz</code></i>\n\n"
+                                "⚡ <i>Sabhi keys automatic round-robin load balancer pool me add ho jayengi!</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        elif cb_data == "export_speedz_keys":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            await answer_tg_callback(client, cb_id, "📥 Exporting Speedz Keys...")
+                            await handle_export_speedz_keys(client, cb_chat_id)
+                            continue
+
+                        elif cb_data == "clear_speedz_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            update_user_config(cb_chat_id, {"speedz_keys": []})
+                            save_saved_speedz_keys_global([])
+                            await answer_tg_callback(client, cb_id, "🗑️ Custom Speedz keys cleared!")
+                            sp_text, sp_kb = build_speedz_settings_message_and_markup(cb_chat_id)
+                            await send_tg_message(client, cb_chat_id, f"🗑️ <b>Custom Speedz Keys Cleared!</b>\n\n{sp_text}", reply_markup=sp_kb)
                             continue
 
                         elif cb_data == "open_engine_menu":
@@ -5506,7 +5644,17 @@ async def bot_loop():
                         settings_kb = {
                             "inline_keyboard": [
                                 [
+                                    {"text": "⚡ API Engine & Target Limit", "callback_data": "open_engine_menu"},
+                                ],
+                                [
                                     {"text": "👤 Crowstack Session / Identity", "callback_data": "open_identity_menu"},
+                                ],
+                                [
+                                    {"text": "⚡ Speedz Keys & Load Balancer", "callback_data": "open_speedz_menu"},
+                                ],
+                                [
+                                    {"text": "➕ Add Speedz Keys (Bulk)", "callback_data": "add_speedz_prompt"},
+                                    {"text": "📥 Export Speedz (.txt)", "callback_data": "export_speedz_keys"},
                                 ],
                                 [
                                     {"text": "🔗 Change Referral Link", "callback_data": "set_ref_link"},
@@ -6231,27 +6379,57 @@ async def bot_loop():
                         state["manual_step"] = None
                         await convert_and_send_json(client, chat_id, content)
 
-                    # ── 🔍 Speedz Checker Keys Management (/speedzkeys, /addspeedz, /delspeedz) ──
-                    elif text.startswith("/speedzkeys") or text == "🔍 Speedz Keys":
-                        sp_keys = get_speedz_keys_pool(chat_id)
-                        lines = [
-                            "🔍 <b>SPEEDZ CHECKER API KEYS (LOAD BALANCED)</b>",
-                            "━━━━━━━━━━━━━━━━━━━━━━━━━",
-                            f"⚡ <b>Total Keys in Pool:</b> <b>{len(sp_keys)}</b>",
-                            f"⏱️ <b>Capacity:</b> ~<b>{len(sp_keys) * 12} requests/min</b> (1 req/5s per key)",
-                            "━━━━━━━━━━━━━━━━━━━━━━━━━",
-                        ]
-                        for s_idx, s_k in enumerate(sp_keys, start=1):
-                            masked_s = s_k[:8] + "..." + s_k[-6:] if len(s_k) > 14 else s_k
-                            last_u = SPEEDZ_LAST_USED.get(s_k, 0.0)
-                            time_ago = f"{int(time.time() - last_u)}s ago" if last_u > 0 else "Never"
-                            lines.append(f"{s_idx}. <code>{masked_s}</code> (Last used: {time_ago})")
-                        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
-                        lines.append("👉 <b>Nayi key add karne ke liye:</b>")
-                        lines.append("<code>/addspeedz &lt;API_KEY&gt;</code>")
-                        lines.append("👉 <b>Sabhi keys reset/clear karne ke liye:</b>")
-                        lines.append("<code>/clearspeedz</code>")
-                        await send_tg_message(client, chat_id, "\n".join(lines), reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                    # ── 🔍 Speedz Checker Keys Management (/speedzkeys, /addspeedz, /exportspeedz, /clearspeedz) ──
+                    elif state.get("manual_step") == "awaiting_speedz_bulk":
+                        content = text
+                        doc = msg.get("document")
+                        if doc and doc.get("file_id"):
+                            try:
+                                f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
+                                if f_res.status_code == 200:
+                                    f_path = f_res.json().get("result", {}).get("file_path")
+                                    if f_path:
+                                        dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
+                                        content = dl_res.text
+                            except Exception as e:
+                                print(f"[Speedz File Import Error] {e}")
+
+                        new_keys = re.findall(r"[a-zA-Z0-9_\-]{15,100}", content)
+                        state["manual_step"] = None
+                        if new_keys:
+                            cur_keys = cfg.get("speedz_keys", [])
+                            if not isinstance(cur_keys, list):
+                                cur_keys = []
+                            added_c = 0
+                            for nk in new_keys:
+                                if nk not in cur_keys and nk != DEFAULT_SPEEDZ_KEY:
+                                    cur_keys.append(nk)
+                                    added_c += 1
+                            update_user_config(chat_id, {"speedz_keys": cur_keys})
+                            save_saved_speedz_keys_global(cur_keys)
+                            total_now = len(get_speedz_keys_pool(chat_id))
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"✅ <b>{added_c} Speedz API Key(s) Successfully Added!</b>\n"
+                                f"📊 <b>Total Pool:</b> {total_now} Keys (~{total_now * 12} checks/min)\n"
+                                f"⚡ Round-Robin Auto-Rotation enabled across all keys!",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+                        else:
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "❌ Koi valid Speedz API Key nahi mili. Format jaise: <code>AK_xxx</code>",
+                                reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                            )
+
+                    elif text.startswith("/exportspeedz") or text.startswith("/exportspeedzkeys") or text.lower() in ("export spedzapi", "export speedzapi", "⚡ export speedz keys", "export speedz"):
+                        await handle_export_speedz_keys(client, chat_id)
+
+                    elif text.startswith("/speedzkeys") or text == "🔍 Speedz Keys" or text == "⚡ Speedz Keys":
+                        sp_text, sp_kb = build_speedz_settings_message_and_markup(chat_id)
+                        await send_tg_message(client, chat_id, sp_text, reply_markup=sp_kb)
 
                     elif text.startswith("/addspeedz"):
                         parts = text.split(maxsplit=1)
@@ -6267,6 +6445,7 @@ async def bot_loop():
                                         cur_keys.append(nk)
                                         added_c += 1
                                 update_user_config(chat_id, {"speedz_keys": cur_keys})
+                                save_saved_speedz_keys_global(cur_keys)
                                 total_now = len(get_speedz_keys_pool(chat_id))
                                 await send_tg_message(
                                     client,
@@ -6279,10 +6458,20 @@ async def bot_loop():
                             else:
                                 await send_tg_message(client, chat_id, "❌ Valid API Key format detect nahi hua. Jaise: <code>/addspeedz AK_xxx</code>")
                         else:
-                            await send_tg_message(client, chat_id, "ℹ️ <b>Usage:</b> <code>/addspeedz &lt;API_KEY&gt;</code>\n(Ek sath multiple keys bhi paste kar sakte hain)")
+                            state["manual_step"] = "awaiting_speedz_bulk"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                "⚡ <b>Speedz Checker API Keys Bhejein:</b>\n\n"
+                                "👉 <i>Ek sath multiple keys paste karein ya .txt file bhej sakte hain.\n"
+                                "Example: <code>AK_xxx AK_yyy AK_zzz</code></i>",
+                                reply_markup=cancel_markup,
+                            )
 
                     elif text == "/clearspeedz":
                         update_user_config(chat_id, {"speedz_keys": []})
+                        save_saved_speedz_keys_global([])
                         await send_tg_message(
                             client,
                             chat_id,
