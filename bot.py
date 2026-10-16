@@ -104,7 +104,73 @@ CROWSTACK_PROFILES = {
             "&hash=5053843b84afdbae4fd996a83224bcc571329fddfa91a0bd462d995ff26a95be"
         ),
     },
+    "session3": {
+        "id": "session3",
+        "name": "Session 3 (MarinKitagwa123 #8691393716)",
+        "user_id": "8691393716",
+        "user_name": "MarinKitagwa123",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="154", "Not A(Brand";v="99"',
+        "sec_ch_ua_mobile": "?0",
+        "sec_ch_ua_platform": '"Windows"',
+        "x_tg_init_data": (
+            "query_id=AAG0JAwGBAAAALQkDAaIYRD3&user=%7B%22id%22%3A8691393716%2C%22first_name%22%3A%22Don%27t%20AskForName%22%2C%22last_name%22%3A%22%22%2C%22username%22%3A%22MarinKitagwa123%22%2C%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2Frc-kUBgyN1MQtwHbuKioRqG34P_3qD42UFR_ZHoG7kesBta9Ld6rEWz6JBI8i7GI.svg%22%7D"
+            "&auth_date=1792126601&signature=AjSMEJVRu2roa8YIGHjbI62oiQtd9GHaSSV6J0buvBA526Al2K5il95Bzat0Yhf8YS2euHx3tJlna4FsBHTQBg"
+            "&hash=74368c5a6457536400e6404378aa34c98e06665d10f032eb3993cab45d6acf6a"
+        ),
+    },
 }
+
+# ─── Speedz Checker (tubesave.in v2.0.0) Multi-Key Pool & Load Balancer ──────
+SPEEDZ_BASE_URL = "https://tubesave.in/api/v1"
+DEFAULT_SPEEDZ_KEY = os.getenv("SPEEDZ_API_KEY", "AK_CAlD5Tt-jLsQOX_Jq0t70jtQ57yEOmfY").strip()
+SPEEDZ_LAST_USED = {}  # {api_key: timestamp}
+SPEEDZ_LOCK = asyncio.Lock()
+
+
+def get_speedz_keys_pool(chat_id: int | str = None) -> list[str]:
+    """Retrieves all Speedz Checker API keys for load balancing."""
+    pool = []
+    if chat_id:
+        cfg = get_user_config(chat_id)
+        u_keys = cfg.get("speedz_keys", [])
+        if isinstance(u_keys, list):
+            pool.extend([k.strip() for k in u_keys if k and isinstance(k, str) and k.strip()])
+    if DEFAULT_SPEEDZ_KEY and DEFAULT_SPEEDZ_KEY not in pool:
+        pool.append(DEFAULT_SPEEDZ_KEY)
+    # Filter uniques while preserving order
+    seen = set()
+    res = []
+    for k in pool:
+        if k not in seen:
+            seen.add(k)
+            res.append(k)
+    return res
+
+
+async def get_next_available_speedz_key(chat_id: int | str = None) -> tuple[str | None, float]:
+    """
+    Selects the best available Speedz API key with least cooldown or lowest last-used timestamp.
+    Returns (api_key, wait_seconds). If wait_seconds <= 0, key is ready immediately.
+    """
+    async with SPEEDZ_LOCK:
+        keys = get_speedz_keys_pool(chat_id)
+        if not keys:
+            return None, 0.0
+
+        now = time.time()
+        # Find any key that passed 5.0s cooldown
+        for k in keys:
+            last = SPEEDZ_LAST_USED.get(k, 0.0)
+            if now - last >= 5.0:
+                SPEEDZ_LAST_USED[k] = now
+                return k, 0.0
+
+        # If all keys currently in 5s cooldown, pick the one with lowest wait time
+        best_k = min(keys, key=lambda x: SPEEDZ_LAST_USED.get(x, 0.0))
+        wait_s = max(0.0, 5.0 - (now - SPEEDZ_LAST_USED.get(best_k, 0.0)))
+        SPEEDZ_LAST_USED[best_k] = now + wait_s
+        return best_k, wait_s
 
 
 def get_crowstack_profile_key(chat_id: int | str = None) -> str:
@@ -1413,63 +1479,119 @@ async def cupponhub_verify_otp(client: httpx.AsyncClient, session_id: str, otp: 
         return {"ok": False, "error": f"Cupponhub verify exception: {e}"}
 
 
-# ─── Web Registration Checker ─────────────────────────────────────────────────
-async def check_meesho_reg(client: httpx.AsyncClient, phone: str) -> dict:
-    # 1. First priority: Cupponhub phone check endpoint
-    try:
-        cup_chk = await cupponhub_check_phone(client, phone)
-        if cup_chk.get("ok"):
-            return {
-                "registered": cup_chk.get("registered", False),
-                "fresh": cup_chk.get("fresh", False),
-                "ok": True,
-                "error": None,
-                "source": "cupponhub",
-            }
-    except Exception as e:
-        print(f"[Checker Cupponhub Exception]: {e}")
+# ─── Web Registration Checker (Speedz Checker Multi-Key + Crowstack Fallback) ──
+async def check_meesho_reg(client: httpx.AsyncClient, phone: str, chat_id: int | str = None) -> dict:
+    clean_num = clean_phone(phone)
 
-    # 2. Standard Web Checker APIs
-    payload = {"number": phone}
-    last_err = ""
-    for url, hdr in [(CHECKER_PRIMARY, CHECKER_HEADERS_1), (CHECKER_FALLBACK, CHECKER_HEADERS_2)]:
-        try:
-            r = await client.post(url, json=payload, headers=hdr, timeout=10)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("ok") and d.get("results"):
-                    res = d["results"][0]
+    # 1. Primary Engine: Speedz Checker API with Multi-Key Round-Robin & Rate Limit Bypass
+    try:
+        sp_key, wait_time = await get_next_available_speedz_key(chat_id)
+        if sp_key:
+            if wait_time > 0 and wait_time <= 2.5:
+                await asyncio.sleep(wait_time)
+            
+            headers = {"X-API-Key": sp_key, "Content-Type": "application/json"}
+            sp_res = await client.post(
+                f"{SPEEDZ_BASE_URL}/check",
+                headers=headers,
+                json={"service": "meesho", "number": clean_num},
+                timeout=9,
+            )
+            if sp_res.status_code == 200:
+                data = sp_res.json() or {}
+                if data.get("success") and "is_registered" in data:
+                    is_reg = bool(data["is_registered"])
                     return {
-                        "registered": res.get("registered", False),
-                        "fresh": res.get("fresh", False),
+                        "registered": is_reg,
+                        "fresh": not is_reg,
                         "ok": True,
                         "error": None,
+                        "source": f"speedz ({sp_key[:8]}...)",
                     }
-                elif d.get("error") or d.get("message"):
-                    last_err = d.get("error") or d.get("message")
-            else:
-                last_err = f"HTTP {r.status_code}"
-        except Exception as e:
-            last_err = str(e)
-            continue
-
-    # 3. Third Fallback: Hidenfree check-phone API
-    try:
-        r_hf = await client.post(f"{HIDENFREE_BASE}/login/check-phone", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=10)
-        if r_hf.status_code == 200:
-            d_hf = r_hf.json()
-            if d_hf.get("ok"):
-                is_reg = bool(d_hf.get("registered", False))
-                return {
-                    "registered": is_reg,
-                    "fresh": not is_reg,
-                    "ok": True,
-                    "error": None,
-                }
+            elif sp_res.status_code == 429:
+                print(f"[Speedz Rate Limit Hit on key {sp_key[:8]}...]")
     except Exception as e:
-        last_err = str(e)
+        print(f"[Speedz Checker Exception]: {e}")
 
-    return {"registered": None, "fresh": None, "ok": False, "error": last_err or "All checker endpoints unreachable"}
+    # 2. Secondary Engine: Crowstack Registration Status Check (Active & Ultra-Accurate)
+    try:
+        for prof_k in ("new", "main", "session3"):
+            p_inf = CROWSTACK_PROFILES.get(prof_k)
+            if not p_inf:
+                continue
+            cs_headers = {
+                "Accept": "*/*",
+                "Content-Type": "application/json",
+                "Origin": "https://meesho.crowstack.tech",
+                "Referer": "https://meesho.crowstack.tech/",
+                "User-Agent": p_inf["user_agent"],
+                "X-Tg-Init-Data": p_inf["x_tg_init_data"],
+            }
+            cs_payload = {
+                "phone": clean_num,
+                "ref_link": REFERRAL_LINK,
+                "force": True
+            }
+            r_cs = await client.post(
+                f"{CROWSTACK_BASE}/send-otp",
+                headers=cs_headers,
+                json=cs_payload,
+                timeout=10,
+            )
+            if r_cs.status_code == 200:
+                d_cs = r_cs.json() or {}
+                if d_cs.get("ok") and "registered" in d_cs:
+                    is_reg = bool(d_cs["registered"])
+                    return {
+                        "registered": is_reg,
+                        "fresh": not is_reg,
+                        "ok": True,
+                        "error": None,
+                        "source": f"crowstack ({prof_k})",
+                    }
+    except Exception as e:
+        print(f"[Crowstack Checker Exception]: {e}")
+
+    # ── Legacy Checkers (Preserved & Commented as requested) ──
+    # # 1. Cupponhub phone check endpoint
+    # try:
+    #     cup_chk = await cupponhub_check_phone(client, phone)
+    #     if cup_chk.get("ok"):
+    #         return {
+    #             "registered": cup_chk.get("registered", False),
+    #             "fresh": cup_chk.get("fresh", False),
+    #             "ok": True,
+    #             "error": None,
+    #             "source": "cupponhub",
+    #         }
+    # except Exception as e:
+    #     print(f"[Checker Cupponhub Exception]: {e}")
+    #
+    # # 2. Standard Web Checker APIs (PriceTrackerPro / ProMeesho)
+    # payload = {"number": phone}
+    # for url, hdr in [(CHECKER_PRIMARY, CHECKER_HEADERS_1), (CHECKER_FALLBACK, CHECKER_HEADERS_2)]:
+    #     try:
+    #         r = await client.post(url, json=payload, headers=hdr, timeout=10)
+    #         if r.status_code == 200:
+    #             d = r.json()
+    #             if d.get("ok") and d.get("results"):
+    #                 res = d["results"][0]
+    #                 return {"registered": res.get("registered", False), "fresh": res.get("fresh", False), "ok": True, "error": None}
+    #     except Exception:
+    #         continue
+    #
+    # # 3. Hidenfree check-phone API
+    # try:
+    #     r_hf = await client.post(f"{HIDENFREE_BASE}/login/check-phone", headers=HIDENFREE_HEADERS, json={"phone": phone}, timeout=10)
+    #     if r_hf.status_code == 200:
+    #         d_hf = r_hf.json()
+    #         if d_hf.get("ok"):
+    #             is_reg = bool(d_hf.get("registered", False))
+    #             return {"registered": is_reg, "fresh": not is_reg, "ok": True, "error": None}
+    # except Exception:
+    #     pass
+
+    return {"registered": None, "fresh": None, "ok": False, "error": "All checkers (Speedz & Crowstack) failed"}
 
 
 # ─── Send OTP & Verify (Crowstack + Fallback) ──────────────────────────────────
@@ -1926,9 +2048,11 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
     # Method 2: Crowstack
     if method == "crowstack":
         prof_key = session.get("profile", get_crowstack_profile_key(cid))
+        # Ensure all 3 sessions are attempted in order
         profiles_to_try = [prof_key]
-        alt = "main" if prof_key == "new" else "new"
-        profiles_to_try.append(alt)
+        for candidate in ("new", "main", "session3"):
+            if candidate not in profiles_to_try:
+                profiles_to_try.append(candidate)
 
         for p_k in profiles_to_try:
             try:
@@ -2034,8 +2158,8 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                     await send_tg_message(client, cid, f"🚨 <b>[Crowstack Verify Exception]:</b> <code>{e}</code>")
 
         if cid:
-            await send_tg_message(client, cid, f"❌ <b>[Crowstack Verify] Both Rem & Marin sessions failed for +91{phone}!</b>")
-        return {"ok": False, "error": "Crowstack verify failed across both profiles."}
+            await send_tg_message(client, cid, f"❌ <b>[Crowstack Verify] All 3 sessions (Rem, Marin & Marin123) failed for +91{phone}!</b>")
+        return {"ok": False, "error": "Crowstack verify failed across all 3 sessions.", "fail_type": "crowstack_verify"}
 
     # Method 2: Hidenfree
     if session.get("method") == "hidenfree":
@@ -3177,6 +3301,8 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             f"❌ <b>Registered Numbers Cancelled:</b> {state.get('registered_count', 0)}\n"
             f"🎉 <b>Session Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
             f"⚠️ <b>Session Account Creation Failed:</b> <b>{state.get('failed_creations', 0)}</b>\n"
+            f"   ├── ⏰ <b>SMS Timeout (2m):</b> <b>{state.get('failed_sms_timeout', 0)}</b>\n"
+            f"   └── 🦅 <b>Crowstack Verify Rejected:</b> <b>{state.get('failed_crowstack_verify', 0)}</b>\n"
             f"💵 <b>Total Pool Wallet:</b> <b>₹{total_bal:.2f}</b>\n\n"
             f"{top_recommendation}"
             f"⚡ <b>Per-Worker Performance & Balances:</b>\n{w_details}\n"
@@ -3424,10 +3550,10 @@ async def run_single_key_worker(
         await record_transaction("NUMBER_BOUGHT", phone, worker_id, current_server, cur_bal, f"Key: {key_preview} (Race Win)")
         print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⚡ Server {current_server} won! Got number: {phone} (ID: {act_id}, Bal: ₹{cur_bal}) — checking registration...")
 
-        chk = await check_meesho_reg(client, phone)
+        chk = await check_meesho_reg(client, phone, chat_id=chat_id)
         if not chk.get("ok"):
             await asyncio.sleep(1.0)
-            chk = await check_meesho_reg(client, phone)
+            chk = await check_meesho_reg(client, phone, chat_id=chat_id)
 
         if not chk.get("ok"):
             err_detail = chk.get("error", "Both checker endpoints down")
@@ -3528,6 +3654,7 @@ async def run_single_key_worker(
         if not otp_code:
             w_state["failed"] = w_state.get("failed", 0) + 1
             state["failed_creations"] = state.get("failed_creations", 0) + 1
+            state["failed_sms_timeout"] = state.get("failed_sms_timeout", 0) + 1
             await record_failed_account(phone, worker_id, current_server, key_preview, "SMS Timeout (2 Mins Elapsed)")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone} (2 mins elapsed). Sending cancel request...")
             cur_bal = await otpd_balance(client, api_key)
@@ -3539,7 +3666,7 @@ async def run_single_key_worker(
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
                 f"⚠️ <b>Reason:</b> OTP Doctor se 2 min me SMS nahi aaya.\n"
-                f"📊 <b>Total Failed in Session:</b> <b>{state.get('failed_creations', 0)}</b>\n"
+                f"📊 <b>Session Failures:</b> Total: <b>{state.get('failed_creations', 0)}</b> | ⏰ SMS Timeout: <b>{state.get('failed_sms_timeout', 0)}</b>\n"
                 f"🔄 Number cancel & refund queued.",
             )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
@@ -3637,18 +3764,19 @@ async def run_single_key_worker(
             err_msg = login_res.get("error", "Login failed")
             w_state["failed"] = w_state.get("failed", 0) + 1
             state["failed_creations"] = state.get("failed_creations", 0) + 1
-            await record_failed_account(phone, worker_id, current_server, key_preview, f"Meesho Login Verify Failed: {err_msg}")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Meesho login failed: {err_msg}. Queued cancel...")
+            state["failed_crowstack_verify"] = state.get("failed_crowstack_verify", 0) + 1
+            await record_failed_account(phone, worker_id, current_server, key_preview, f"Crowstack Verify Rejected: {err_msg}")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Crowstack verify failed: {err_msg}. Queued cancel...")
             cur_bal = await otpd_balance(client, api_key)
             await record_transaction("LOGIN_FAILED_CANCEL", phone, worker_id, current_server, cur_bal, err_msg)
             await send_tg_message(
                 client,
                 chat_id,
-                f"❌ <b>[Account Creation Failed — Login Verify]</b>\n"
+                f"❌ <b>[Account Creation Failed — Crowstack Verify Rejected]</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
                 f"⚠️ <b>Reason:</b> <code>{err_msg}</code>\n"
-                f"📊 <b>Total Failed in Session:</b> <b>{state.get('failed_creations', 0)}</b>\n"
+                f"📊 <b>Session Failures:</b> Total: <b>{state.get('failed_creations', 0)}</b> | 🦅 Verify Rejected: <b>{state.get('failed_crowstack_verify', 0)}</b>\n"
                 f"🔄 Number cancel & refund ho gaya.",
             )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
@@ -3825,10 +3953,10 @@ async def handle_manual_number_check(client: httpx.AsyncClient, chat_id: int | s
         return
 
     await send_tg_message(client, chat_id, f"🔍 Checking <code>+91{phone}</code> on Meesho...")
-    chk = await check_meesho_reg(client, phone)
+    chk = await check_meesho_reg(client, phone, chat_id=chat_id)
     if not chk["ok"]:
         await asyncio.sleep(1)
-        chk = await check_meesho_reg(client, phone)
+        chk = await check_meesho_reg(client, phone, chat_id=chat_id)
 
     if not chk["ok"]:
         err_detail = chk.get("error", "Both checker endpoints unreachable")
@@ -6102,6 +6230,65 @@ async def bot_loop():
 
                         state["manual_step"] = None
                         await convert_and_send_json(client, chat_id, content)
+
+                    # ── 🔍 Speedz Checker Keys Management (/speedzkeys, /addspeedz, /delspeedz) ──
+                    elif text.startswith("/speedzkeys") or text == "🔍 Speedz Keys":
+                        sp_keys = get_speedz_keys_pool(chat_id)
+                        lines = [
+                            "🔍 <b>SPEEDZ CHECKER API KEYS (LOAD BALANCED)</b>",
+                            "━━━━━━━━━━━━━━━━━━━━━━━━━",
+                            f"⚡ <b>Total Keys in Pool:</b> <b>{len(sp_keys)}</b>",
+                            f"⏱️ <b>Capacity:</b> ~<b>{len(sp_keys) * 12} requests/min</b> (1 req/5s per key)",
+                            "━━━━━━━━━━━━━━━━━━━━━━━━━",
+                        ]
+                        for s_idx, s_k in enumerate(sp_keys, start=1):
+                            masked_s = s_k[:8] + "..." + s_k[-6:] if len(s_k) > 14 else s_k
+                            last_u = SPEEDZ_LAST_USED.get(s_k, 0.0)
+                            time_ago = f"{int(time.time() - last_u)}s ago" if last_u > 0 else "Never"
+                            lines.append(f"{s_idx}. <code>{masked_s}</code> (Last used: {time_ago})")
+                        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        lines.append("👉 <b>Nayi key add karne ke liye:</b>")
+                        lines.append("<code>/addspeedz &lt;API_KEY&gt;</code>")
+                        lines.append("👉 <b>Sabhi keys reset/clear karne ke liye:</b>")
+                        lines.append("<code>/clearspeedz</code>")
+                        await send_tg_message(client, chat_id, "\n".join(lines), reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+
+                    elif text.startswith("/addspeedz"):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and parts[1].strip():
+                            new_keys = re.findall(r"[a-zA-Z0-9_\-]{15,100}", parts[1])
+                            if new_keys:
+                                cur_keys = cfg.get("speedz_keys", [])
+                                if not isinstance(cur_keys, list):
+                                    cur_keys = []
+                                added_c = 0
+                                for nk in new_keys:
+                                    if nk not in cur_keys and nk != DEFAULT_SPEEDZ_KEY:
+                                        cur_keys.append(nk)
+                                        added_c += 1
+                                update_user_config(chat_id, {"speedz_keys": cur_keys})
+                                total_now = len(get_speedz_keys_pool(chat_id))
+                                await send_tg_message(
+                                    client,
+                                    chat_id,
+                                    f"✅ <b>{added_c} Speedz API Key(s) Successfully Added!</b>\n"
+                                    f"📊 <b>Total Pool:</b> {total_now} Keys (~{total_now * 12} checks/min)\n"
+                                    f"⚡ Round-Robin Load Balancing enabled!",
+                                    reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                                )
+                            else:
+                                await send_tg_message(client, chat_id, "❌ Valid API Key format detect nahi hua. Jaise: <code>/addspeedz AK_xxx</code>")
+                        else:
+                            await send_tg_message(client, chat_id, "ℹ️ <b>Usage:</b> <code>/addspeedz &lt;API_KEY&gt;</code>\n(Ek sath multiple keys bhi paste kar sakte hain)")
+
+                    elif text == "/clearspeedz":
+                        update_user_config(chat_id, {"speedz_keys": []})
+                        await send_tg_message(
+                            client,
+                            chat_id,
+                            f"🗑️ <b>Custom Speedz Keys Cleared!</b>\nAb default server key use hogi (Total: {len(get_speedz_keys_pool(chat_id))} key).",
+                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
+                        )
 
                     # ── ⚙️ Select Servers (Max 2) ──
                     elif text.startswith("/servers") or text == "⚙️ Select Servers":
