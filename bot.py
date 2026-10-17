@@ -67,22 +67,14 @@ CROWSTACK_ACCOUNT_BASE = "https://meesho.crowstack.tech/api/account"
 CROWSTACK_PROFILES = {
     "new": {
         "id": "new",
-        "name": "New Session (Rem #8912242607 - Edge)",
+        "name": "New Session (Nikit #8912242607 - Edge)",
         "user_id": "8912242607",
-        "user_name": "Rem",
+        "user_name": "Nikit",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0",
         "sec_ch_ua": '"Chromium";v="154", "Microsoft Edge";v="154", "Not A(Brand";v="99"',
         "sec_ch_ua_mobile": "?0",
         "sec_ch_ua_platform": '"Windows"',
-        "x_tg_init_data": (
-            "query_id=AAGvBzYTBAAAAK8HNhP0JMOa&user=%7B%22id%22%3A8912242607%2C"
-            "%22first_name%22%3A%22Rem%22%2C%22last_name%22%3A%22%22%2C"
-            "%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C"
-            "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
-            "%2FCzB6ff0QnWjL-1jduLteUDGtPQ_2cw5UV_KgdSt69fDwah01TLx2_AIcKiFqxJey.svg%22%7D"
-            "&auth_date=1791267011&signature=ZfxBlm1N-WlMJS_IaVHwc8XECRdkJ4mZvAk6GAGhwXQ27oJjEnjROyPs38f614IH4mVoS1dbZyJlhVUhe6YsDA"
-            "&hash=227b74bf8371f4b4622526dcff9fc9b0c3ff875e079e5d14f9ab3e6459ea1836"
-        ),
+        "x_tg_init_data": "query_id=AAGvBzYTBAAAAK8HNhMzhhua&user=%7B%22id%22%3A8912242607%2C%22first_name%22%3A%22Nikit%22%2C%22last_name%22%3A%22%22%2C%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2FCzB6ff0QnWjL-1jduLteUDGtPQ_2cw5UV_KgdSt69fDwah01TLx2_AIcKiFqxJey.svg%22%7D&auth_date=1792225371&signature=7N1pVOo4ORLfWrSjOstQ9w7PP1232y5QsLLIIoq_GyHgz6pHUtFU09aGRbzyvD0-EFpZnq0Dqqd91mzWmm7wDg&hash=a6e0369cfc2c519da67f296a91175b7b0176fcee1ee0020f5a9b75e7bbbe671c",
     },
     "main": {
         "id": "main",
@@ -93,16 +85,7 @@ CROWSTACK_PROFILES = {
         "sec_ch_ua": '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
         "sec_ch_ua_mobile": "?0",
         "sec_ch_ua_platform": '"Windows"',
-        "x_tg_init_data": (
-            "query_id=AAEVN7JtAwAAABU3sm2RRyPU&user=%7B%22id%22%3A8282846997%2C"
-            "%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C"
-            "%22username%22%3A%22MarinKitagwa12%22%2C%22language_code%22%3A%22en%22%2C"
-            "%22allows_write_to_pm%22%3Atrue%2C"
-            "%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C"
-            "%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D"
-            "&auth_date=1791267282&signature=jek5Kw5vBCuMMoDDpnnegR1_gi_sX_HiHKug258EgQfY_RHXXuJfiMr1joAASu0WP5yUajTbXMjKtekEUdvSDA"
-            "&hash=5053843b84afdbae4fd996a83224bcc571329fddfa91a0bd462d995ff26a95be"
-        ),
+        "x_tg_init_data": "query_id=AAEVN7JtAwAAABU3sm1QtPuH&user=%7B%22id%22%3A8282846997%2C%22first_name%22%3A%22Marin%22%2C%22last_name%22%3A%22%22%2C%22language_code%22%3A%22en%22%2C%22allows_write_to_pm%22%3Atrue%2C%22photo_url%22%3A%22https%3A%5C%2F%5C%2Ft.me%5C%2Fi%5C%2Fuserpic%5C%2F320%5C%2FCd3jfjEFdjJYBiKIo4WzzZvJU53Lb8Cy84uyXS3KREOS1owG9u4WgR40VQwx0oOR.svg%22%7D&auth_date=1792224917&signature=eRDMjVmN_R9XOOhTlKwewowZSSmMGSPW_ti1xCVmRIDHmOhjX-xBvDBoW1XF9SqUWShBcgYWq8jT9FosBejgAA&hash=0aea774ef60eefe6140ba64514f74d44c10e045924f6e542957b06251e5e2f9f",
     },
     "session3": {
         "id": "session3",
