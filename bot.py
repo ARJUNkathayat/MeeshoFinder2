@@ -3393,8 +3393,12 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
                 f"• Safe Buffer: <b>{buf_str}</b>\n\n"
             )
 
+        max_tot = int(cfg.get("max_total_crowstack_rejects", 5))
+        max_consec = int(cfg.get("max_consecutive_crowstack_rejects", 3))
+        tot_rej = state.get("failed_crowstack_verify", 0)
         consec_rej = state.get("consecutive_crowstack_rejects", 0)
-        consec_str = f" ⚠️ (Consecutive: {consec_rej}/3 - Auto-Stop on 3)" if consec_rej > 0 else ""
+        tot_disp = f"<b>{tot_rej}/{max_tot}</b> (Auto-Stop at {max_tot})" if max_tot > 0 else f"<b>{tot_rej}</b>"
+        consec_str = f" ⚠️ (Consecutive: <b>{consec_rej}/{max_consec}</b> - Auto-Stop on {max_consec})" if (max_consec > 0 and consec_rej > 0) else (f" (Consecutive: <b>{consec_rej}</b>)" if consec_rej > 0 else "")
 
         stats_text = (
             f"📊 <b>LIVE MULTI-KEY HUNTING STATS</b>\n"
@@ -3412,7 +3416,7 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             f"🎉 <b>Session Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
             f"⚠️ <b>Session Account Creation Failed:</b> <b>{state.get('failed_creations', 0)}</b>\n"
             f"   ├── ⏰ <b>SMS Timeout (2m):</b> <b>{state.get('failed_sms_timeout', 0)}</b>\n"
-            f"   ├── 🦅 <b>Crowstack Verify Rejected:</b> <b>{state.get('failed_crowstack_verify', 0)}</b>{consec_str}\n"
+            f"   ├── 🦅 <b>Crowstack Verify Rejected:</b> {tot_disp}{consec_str}\n"
             f"   └── 🔄 <b>In Line for Cancel (Queue):</b> <b>{state.get('pending_cancels', 0)}</b>\n"
             f"💵 <b>Total Pool Wallet:</b> <b>₹{total_bal:.2f}</b>\n\n"
             f"{top_recommendation}"
@@ -3568,11 +3572,13 @@ async def compute_target_limit_budget_message(client: httpx.AsyncClient, chat_id
 
 
 def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
-    """Builds the API Engine, Tier & Target Limit configuration menu."""
+    """Builds the API Engine, Tier, Target Limit & Crowstack Safety Limit configuration menu."""
     cfg = get_user_config(chat_id)
     cur_engine = cfg.get("api_engine", "crowstack")
     cur_tier = int(cfg.get("cupponhub_tier", 200))
     cur_limit = int(cfg.get("target_limit", 0))
+    cur_max_tot = int(cfg.get("max_total_crowstack_rejects", 5))
+    cur_max_consec = int(cfg.get("max_consecutive_crowstack_rejects", 3))
 
     engine_names = {
         "cupponhub": f"🛍️ Cupponhub (Tier: ₹{cur_tier} OFF)",
@@ -3583,17 +3589,23 @@ def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
     }
     cur_engine_label = engine_names.get(cur_engine, cur_engine)
     limit_label = f"🎯 <b>Max {cur_limit} Accounts (Auto-Stop)</b>" if cur_limit > 0 else "♾️ <b>Unlimited (Continuous Hunt)</b>"
+    tot_rej_label = f"🛑 <b>Max {cur_max_tot} Total Rejects (Auto-Stop)</b>" if cur_max_tot > 0 else "♾️ <b>Disabled (No Limit)</b>"
+    consec_rej_label = f"⚠️ <b>Max {cur_max_consec} In A Row (Auto-Stop)</b>" if cur_max_consec > 0 else "♾️ <b>Disabled (No Limit)</b>"
 
     lines = [
-        "⚡ <b>MEESHO BOT — API ENGINE & TARGET CONFIG</b>",
+        "⚡ <b>MEESHO BOT — API ENGINE, TARGET & SAFETY CONFIG</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"⚙️ <b>Active Account Creator Engine:</b>\n👉 <code>{cur_engine_label}</code>\n",
+        f"⚙️ <b>Active Creator Engine:</b>\n👉 <code>{cur_engine_label}</code>\n",
         f"🏷️ <b>Cupponhub Offer Tier:</b> <b>₹{cur_tier} OFF</b>",
-        f"🎯 <b>Configured Target Limit:</b> {limit_label}\n",
+        f"🎯 <b>Target Account Limit:</b> {limit_label}\n",
+        f"🛡️ <b>Crowstack Total Reject Limit:</b> {tot_rej_label}",
+        f"🔁 <b>Crowstack Consecutive Reject Limit:</b> {consec_rej_label}\n",
         "💡 <i>Aap choose kar sakte hain:</i>\n"
         "• <b>API Engine:</b> Cupponhub, Crowstack, GemixAI ya Auto-Failover\n"
         "• <b>Tier:</b> ₹200 OFF ya ₹180 OFF\n"
-        "• <b>Target Limit:</b> Kitne accounts banakar bot auto-stop kare (in-flight accounts finish karke safe exit)\n",
+        "• <b>Target Limit:</b> Kitne accounts banne par bot auto-stop ho\n"
+        "• <b>Total Reject Limit:</b> Poore hunt me kitne Crowstack reject par auto-stop ho (e.g. 5)\n"
+        "• <b>Consecutive Reject Limit:</b> Lagatar kitne Crowstack reject par auto-stop ho (e.g. 3)\n",
         "━━━━━━━━━━━━━━━━━━━━━━━━━",
         "👇 <b>Niche diye gaye buttons se turant customize karein:</b>",
     ]
@@ -3626,10 +3638,14 @@ def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
             ],
             [
                 {"text": f"🎯 Target Limit: {cur_limit if cur_limit > 0 else 'Unlimited'}", "callback_data": "set_limit_prompt"},
-                {"text": "🚀 Launch Hunt", "callback_data": "launch_hunt_action"},
             ],
             [
-                {"text": "🔙 Back to Store Settings", "callback_data": "open_settings_menu"},
+                {"text": f"🛡️ Total Rejects: {cur_max_tot if cur_max_tot > 0 else 'Off'}", "callback_data": "set_total_reject_prompt"},
+                {"text": f"🔁 Consecutive: {cur_max_consec if cur_max_consec > 0 else 'Off'}", "callback_data": "set_consec_reject_prompt"},
+            ],
+            [
+                {"text": "🚀 Launch Hunt", "callback_data": "launch_hunt_action"},
+                {"text": "🔙 Store Settings", "callback_data": "open_settings_menu"},
             ]
         ]
     }
@@ -3943,10 +3959,19 @@ async def run_single_key_worker(
             state["failed_creations"] = state.get("failed_creations", 0) + 1
             state["failed_crowstack_verify"] = state.get("failed_crowstack_verify", 0) + 1
             state["consecutive_crowstack_rejects"] = state.get("consecutive_crowstack_rejects", 0) + 1
+
+            cfg_user = get_user_config(chat_id)
+            max_tot = int(cfg_user.get("max_total_crowstack_rejects", 5))
+            max_consec = int(cfg_user.get("max_consecutive_crowstack_rejects", 3))
+
+            tot_rej = state["failed_crowstack_verify"]
             consec = state["consecutive_crowstack_rejects"]
 
+            tot_tag = f"{tot_rej}/{max_tot}" if max_tot > 0 else f"{tot_rej} (Limit: Off)"
+            consec_tag = f"{consec}/{max_consec}" if max_consec > 0 else f"{consec} (Limit: Off)"
+
             await record_failed_account(phone, worker_id, current_server, key_preview, f"Crowstack Verify Rejected: {err_msg}")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Crowstack verify failed: {err_msg} (Consecutive: {consec}/3). Queued cancel...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Crowstack verify failed: {err_msg} (Total: {tot_tag} | Consec: {consec_tag}). Queued cancel...")
             cur_bal = await otpd_balance(client, api_key)
             w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("LOGIN_FAILED_CANCEL", phone, worker_id, current_server, cur_bal, err_msg)
@@ -3958,27 +3983,45 @@ async def run_single_key_worker(
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
                 f"⚠️ <b>Reason:</b> <code>{err_msg}</code>\n"
                 f"📊 <b>Worker #{worker_id}:</b> {w_state.get('accounts', 0)} Created | {w_state.get('crowstack_rejects', 0)} Crowstack Reject | {w_state.get('timeout_fails', 0)} Timeout Fail | Bal: ₹{cur_bal}\n"
-                f"📊 <b>Session Failures:</b> Total: <b>{state.get('failed_creations', 0)}</b> | 🦅 Verify Rejected: <b>{state.get('failed_crowstack_verify', 0)}</b>\n"
-                f"⚠️ <b>Consecutive Rejects:</b> <b>{consec}/3</b>\n"
+                f"📊 <b>Session Failures:</b> Total: <b>{state.get('failed_creations', 0)}</b> | ⏰ SMS Timeout: <b>{state.get('failed_sms_timeout', 0)}</b>\n"
+                f"🦅 <b>Verify Rejects:</b> Total: <b>{tot_tag}</b> | Consecutive: <b>{consec_tag}</b>\n"
                 f"🔄 Number cancel & refund queued.",
             )
             await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0, state=state, w_state=w_state)
             w_state["active_id"] = None
 
-            # Auto-Stop Trigger if 3 consecutive Crowstack rejections occur
-            if consec >= 3:
-                print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] Crowstack verify rejected {consec} times consecutively! Stopping hunt...")
+            # Auto-Stop Trigger 1: Total Crowstack Rejections Limit reached
+            if max_tot > 0 and tot_rej >= max_tot:
+                print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] Total Crowstack verify rejections reached {tot_rej}/{max_tot}! Stopping hunt...")
                 state["stop_flag"] = True
                 state["hunting"] = False
                 safety_alert = (
                     "🛑 <b>AUTOMATIC SAFETY STOP TRIGGERED!</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⚠️ <b>Crowstack Verify lagatar {consec} baar REJECT ho gaya!</b>\n"
+                    f"⚠️ <b>Total Crowstack Verify Rejections Limit Hit: {tot_rej}/{max_tot}!</b>\n"
                     "💸 OTP Doctor balance aur numbers waste hone se bachane ke liye bot ne hunting turant <b>STOP</b> kar di hai.\n\n"
                     "🔍 <b>Likely Reason:</b>\n"
                     "• Crowstack session expire ho gaya ya token invalid ho gaya hai\n"
                     "• Crowstack server verification requests block kar raha hai\n\n"
-                    "👉 <i>Kripya <code>/profiles</code> se session update karein ya naya session token paste karke dobara /hunt chalayein.</i>"
+                    "👉 <i>Limit change karne ke liye <code>/maxrejects &lt;N&gt;</code> bhejein ya <code>/profiles</code> se session update karke dobara /hunt chalayein.</i>"
+                )
+                await send_tg_message(client, chat_id, safety_alert, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                break
+
+            # Auto-Stop Trigger 2: Consecutive Crowstack Rejections Limit reached
+            elif max_consec > 0 and consec >= max_consec:
+                print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] Crowstack verify rejected {consec}/{max_consec} times consecutively! Stopping hunt...")
+                state["stop_flag"] = True
+                state["hunting"] = False
+                safety_alert = (
+                    "🛑 <b>AUTOMATIC SAFETY STOP TRIGGERED!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚠️ <b>Crowstack Verify lagatar {consec}/{max_consec} baar REJECT ho gaya!</b>\n"
+                    "💸 OTP Doctor balance aur numbers waste hone se bachane ke liye bot ne hunting turant <b>STOP</b> kar di hai.\n\n"
+                    "🔍 <b>Likely Reason:</b>\n"
+                    "• Crowstack session expire ho gaya ya token invalid ho gaya hai\n"
+                    "• Crowstack server verification requests block kar raha hai\n\n"
+                    "👉 <i>Limit change karne ke liye <code>/consecutive &lt;N&gt;</code> bhejein ya <code>/profiles</code> se session update karke dobara /hunt chalayein.</i>"
                 )
                 await send_tg_message(client, chat_id, safety_alert, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
                 break
@@ -5205,6 +5248,52 @@ async def bot_loop():
                                 f"Kitne accounts banakar bot ko auto-stop karna hai?\n"
                                 f"👉 Number type karke bhejein (jaise: <code>70</code> ya <code>3</code> ya <code>0</code> for unlimited):\n\n"
                                 f"<i>(Note: In-flight ban rahe accounts safe finish hoke stop honge)</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        elif cb_data == "set_total_reject_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_total_reject_limit"
+                            await answer_tg_callback(client, cb_id)
+                            cfg_cb = get_user_config(cb_chat_id)
+                            cur_t = int(cfg_cb.get("max_total_crowstack_rejects", 5))
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"🛡️ <b>Crowstack Total Reject Limit Set Karein:</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• <b>Current Limit:</b> <code>{cur_t if cur_t > 0 else 'Disabled (No Limit)'}</code>\n\n"
+                                f"Poore hunt session me kitne total Crowstack verify rejects hone par bot auto-stop kare?\n"
+                                f"👉 Number type karke bhejein (jaise: <code>5</code> ya <code>10</code> ya <code>0</code> for disable):\n\n"
+                                f"<i>(Default 5 rejects par bot stop ho jata hai taaki wallet balance bacha rahe)</i>",
+                                reply_markup=cancel_markup,
+                            )
+                            continue
+
+                        elif cb_data == "set_consec_reject_prompt":
+                            if not is_admin(cb_user_id):
+                                await answer_tg_callback(client, cb_id, "⛔ Admin access required!", show_alert=True)
+                                continue
+                            st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
+                            st["manual_step"] = "awaiting_consec_reject_limit"
+                            await answer_tg_callback(client, cb_id)
+                            cfg_cb = get_user_config(cb_chat_id)
+                            cur_c = int(cfg_cb.get("max_consecutive_crowstack_rejects", 3))
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            await send_tg_message(
+                                client,
+                                cb_chat_id,
+                                f"🔁 <b>Crowstack Consecutive Reject Limit Set Karein:</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• <b>Current Limit:</b> <code>{cur_c if cur_c > 0 else 'Disabled (No Limit)'}</code>\n\n"
+                                f"Lagatar kitne Crowstack verify rejects hone par (bina kisi successful account ke) bot auto-stop kare?\n"
+                                f"👉 Number type karke bhejein (jaise: <code>3</code> ya <code>5</code> ya <code>0</code> for disable):\n\n"
+                                f"<i>(Default 3 lagatar rejects par bot stop hota hai kyunki session expire ho sakta hai)</i>",
                                 reply_markup=cancel_markup,
                             )
                             continue
@@ -6761,6 +6850,76 @@ async def bot_loop():
                             await send_tg_message(client, chat_id, f"{budget_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
                         else:
                             await send_tg_message(client, chat_id, "❌ Kripya valid number bhejein (jaise: <code>3</code> ya <code>0</code> for unlimited).")
+
+                    # ── 🛡️ Crowstack Total Rejects Limit Commands (/maxrejects <n>, /totalrejects <n>, /setrejects <n>) ──
+                    elif text.startswith("/maxrejects") or text.startswith("/totalrejects") or text.startswith("/setrejects") or text in ("🛡️ Total Rejects Limit", "🛡️ Set Max Rejects"):
+                        parts = text.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            r_val = int(parts[1])
+                            update_user_config(chat_id, {"max_total_crowstack_rejects": r_val})
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                            r_msg = f"🛡️ <b>Crowstack Total Reject Limit set to {r_val}!</b> (Bot auto-stops on {r_val} rejects)" if r_val > 0 else "♾️ <b>Crowstack Total Reject Limit Disabled!</b>"
+                            await send_tg_message(client, chat_id, f"{r_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            state["manual_step"] = "awaiting_total_reject_limit"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            cur_t = int(cfg.get("max_total_crowstack_rejects", 5))
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🛡️ <b>Crowstack Total Reject Limit Set Karein:</b>\n\n"
+                                f"<b>Current Limit:</b> {cur_t if cur_t > 0 else 'Disabled (No Limit)'}\n\n"
+                                f"Poore hunt session me kitne total Crowstack verify rejects par bot stop kare?\n"
+                                f"👉 Number type karke bhejein (jaise: <code>5</code> ya <code>10</code> ya <code>0</code> for disable):",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_total_reject_limit":
+                        clean_val = text.strip()
+                        if clean_val.isdigit():
+                            r_val = int(clean_val)
+                            update_user_config(chat_id, {"max_total_crowstack_rejects": r_val})
+                            state["manual_step"] = None
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                            r_msg = f"🛡️ <b>Crowstack Total Reject Limit set to {r_val}!</b> (Bot auto-stops on {r_val} total rejects)" if r_val > 0 else "♾️ <b>Crowstack Total Reject Limit Disabled!</b>"
+                            await send_tg_message(client, chat_id, f"{r_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            await send_tg_message(client, chat_id, "❌ Kripya valid number bhejein (jaise: <code>5</code> ya <code>0</code> for disable).")
+
+                    # ── 🔁 Crowstack Consecutive Rejects Limit Commands (/consecutive <n>, /setconsecutive <n>, /maxconsecutive <n>) ──
+                    elif text.startswith("/consecutive") or text.startswith("/setconsecutive") or text.startswith("/maxconsecutive") or text in ("🔁 Consecutive Limit", "🔁 Set Consecutive"):
+                        parts = text.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            c_val = int(parts[1])
+                            update_user_config(chat_id, {"max_consecutive_crowstack_rejects": c_val})
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                            c_msg = f"🔁 <b>Crowstack Consecutive Reject Limit set to {c_val}!</b> (Bot auto-stops on {c_val} in a row)" if c_val > 0 else "♾️ <b>Crowstack Consecutive Reject Limit Disabled!</b>"
+                            await send_tg_message(client, chat_id, f"{c_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            state["manual_step"] = "awaiting_consec_reject_limit"
+                            cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            cur_c = int(cfg.get("max_consecutive_crowstack_rejects", 3))
+                            await send_tg_message(
+                                client,
+                                chat_id,
+                                f"🔁 <b>Crowstack Consecutive Reject Limit Set Karein:</b>\n\n"
+                                f"<b>Current Limit:</b> {cur_c if cur_c > 0 else 'Disabled (No Limit)'}\n\n"
+                                f"Lagatar kitne Crowstack verify rejects par (bina kisi successful account ke) bot stop kare?\n"
+                                f"👉 Number type karke bhejein (jaise: <code>3</code> ya <code>5</code> ya <code>0</code> for disable):",
+                                reply_markup=cancel_markup,
+                            )
+
+                    elif state.get("manual_step") == "awaiting_consec_reject_limit":
+                        clean_val = text.strip()
+                        if clean_val.isdigit():
+                            c_val = int(clean_val)
+                            update_user_config(chat_id, {"max_consecutive_crowstack_rejects": c_val})
+                            state["manual_step"] = None
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                            c_msg = f"🔁 <b>Crowstack Consecutive Reject Limit set to {c_val}!</b> (Bot auto-stops on {c_val} in a row)" if c_val > 0 else "♾️ <b>Crowstack Consecutive Reject Limit Disabled!</b>"
+                            await send_tg_message(client, chat_id, f"{c_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            await send_tg_message(client, chat_id, "❌ Kripya valid number bhejein (jaise: <code>3</code> ya <code>0</code> for disable).")
 
                     # ── 🚀 Start Hunt ──
                     elif text.startswith("/hunt") or text == "🚀 Start Hunt":
