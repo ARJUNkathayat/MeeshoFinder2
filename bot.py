@@ -1394,6 +1394,8 @@ async def schedule_delayed_cancel(
     act_id: str,
     phone: str = "",
     initial_delay: int = 180,
+    state: dict = None,
+    w_state: dict = None,
 ):
     """
     Automatic Cancel & Refund Manager:
@@ -1401,7 +1403,12 @@ async def schedule_delayed_cancel(
     2. Sends cancel request to OTP Doctor.
     3. If not cancelled yet (e.g. status 600 / timer active), retries every 1 minute (60s)
        until successfully cancelled & refunded.
+    4. Automatically updates pending_cancels count in real-time.
     """
+    if state is not None:
+        state["pending_cancels"] = state.get("pending_cancels", 0) + 1
+    if w_state is not None:
+        w_state["pending_cancels"] = w_state.get("pending_cancels", 0) + 1
     try:
         if initial_delay > 0:
             print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ⏳ Number +91{phone} (ID: {act_id}) queued for cancellation in {initial_delay}s (3 min)...")
@@ -1428,10 +1435,33 @@ async def schedule_delayed_cancel(
         await otpd_cancel_attempt(client, api_key, act_id)
     except Exception as e:
         print(f"[AutoCancel Error] +91{phone} (ID: {act_id}): {e}")
+    finally:
+        if state is not None:
+            state["pending_cancels"] = max(0, state.get("pending_cancels", 1) - 1)
+        if w_state is not None:
+            w_state["pending_cancels"] = max(0, w_state.get("pending_cancels", 1) - 1)
 
 
-async def otpd_cancel(client: httpx.AsyncClient, api_key: str, act_id: str, phone: str = "", initial_delay: int = 180) -> bool:
-    asyncio.create_task(schedule_delayed_cancel(client, api_key, act_id, phone=phone, initial_delay=initial_delay))
+async def otpd_cancel(
+    client: httpx.AsyncClient,
+    api_key: str,
+    act_id: str,
+    phone: str = "",
+    initial_delay: int = 180,
+    state: dict = None,
+    w_state: dict = None,
+) -> bool:
+    asyncio.create_task(
+        schedule_delayed_cancel(
+            client,
+            api_key,
+            act_id,
+            phone=phone,
+            initial_delay=initial_delay,
+            state=state,
+            w_state=w_state,
+        )
+    )
     return True
 
 
@@ -3268,6 +3298,9 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
         session_created = w_st.get("accounts", 0)
         session_failed = w_st.get("failed", 0)
         session_att = w_st.get("attempts", 0)
+        c_rej = w_st.get("crowstack_rejects", 0)
+        t_fail = w_st.get("timeout_fails", 0)
+        p_cancels = w_st.get("pending_cancels", 0)
         w_status = w_st.get("status", "Running" if is_running else "Idle")
 
         all_created = sum(1 for x in history if x.get("key_preview") == masked or (x.get("worker_id") == idx and not x.get("key_preview")))
@@ -3282,6 +3315,9 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             "session_created": session_created,
             "session_failed": session_failed,
             "session_att": session_att,
+            "crowstack_rejects": c_rej,
+            "timeout_fails": t_fail,
+            "pending_cancels": p_cancels,
             "all_created": all_created,
             "all_failed": all_failed,
             "today_created": today_created,
@@ -3321,23 +3357,44 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
     if is_running:
         runtime_mins = int((time.time() - state.get("start_time", time.time())) // 60)
         worker_lines = []
-        max_disp = min(10, len(key_stats))
+        max_disp = min(12, len(key_stats))
         for it in key_stats[:max_disp]:
             idx = it["idx"]
             masked = it["masked"]
             bal = it["balance"]
             s_c = it["session_created"]
-            s_f = it["session_failed"]
-            att = it["session_att"]
+            c_rej = it["crowstack_rejects"]
+            t_fail = it["timeout_fails"]
+            p_cancels = it["pending_cancels"]
             st_text = it["status"]
             bal_tag = " ⚠️ Low Bal" if bal < 20.0 else ""
             rank_badge = "👑 " if top_key and top_key["idx"] == idx and (s_c > 0 or it["all_created"] > 0) else ""
             worker_lines.append(
-                f"• {rank_badge}<b>Worker #{idx} ({masked})</b>: <code>{st_text}</code> | Att: {att} | Created: <b>{s_c}</b> | Failed: <b>{s_f}</b> | Bal: ₹{bal:.2f}{bal_tag}"
+                f"• {rank_badge}<b>Worker #{idx} ({masked}):</b> <code>{st_text}</code>\n"
+                f"   └ <b>{s_c}</b> Created | <b>{c_rej}</b> Crowstack Reject | <b>{t_fail}</b> Timeout Fail | <b>{p_cancels}</b> In Line for Cancel | Bal: <b>₹{bal:.2f}</b>{bal_tag}"
             )
         if len(key_stats) > max_disp:
             worker_lines.append(f"• <i>... aur {len(key_stats) - max_disp} more workers active</i>")
         w_details = "\n".join(worker_lines) if worker_lines else "<i>No active workers</i>"
+
+        target_limit = state.get("target_limit", 0)
+        budget_block = ""
+        if target_limit > 0:
+            created_so_far = state.get("accounts_created", 0)
+            remaining_accs = max(0, target_limit - created_so_far)
+            est_cost_rem = remaining_accs * 12.0
+            est_cost_total = target_limit * 12.0
+            buf_val = total_bal - est_cost_rem
+            buf_str = f"+₹{buf_val:.2f} ✅ (Balance Sufficient)" if buf_val >= 0 else f"-₹{abs(buf_val):.2f} ⚠️ (Deficit)"
+            budget_block = (
+                f"🎯 <b>Target & Budget Progress:</b>\n"
+                f"• Progress: <b>{created_so_far}/{target_limit} Accounts</b> ({remaining_accs} remaining)\n"
+                f"• Estimated Cost: <b>~₹{est_cost_rem:.2f}</b> (Total: ~₹{est_cost_total:.2f} @ ₹12/acc)\n"
+                f"• Safe Buffer: <b>{buf_str}</b>\n\n"
+            )
+
+        consec_rej = state.get("consecutive_crowstack_rejects", 0)
+        consec_str = f" ⚠️ (Consecutive: {consec_rej}/3 - Auto-Stop on 3)" if consec_rej > 0 else ""
 
         stats_text = (
             f"📊 <b>LIVE MULTI-KEY HUNTING STATS</b>\n"
@@ -3345,6 +3402,7 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             f"⚡ <b>Status:</b> 🟢 Running ({len(keys)} Parallel Workers)\n"
             f"⏱️ <b>Uptime:</b> {runtime_mins} minutes\n"
             f"🏷️ <b>Active Servers:</b> <code>{server_names}</code>\n\n"
+            f"{budget_block}"
             f"📅 <b>DAY-WISE CREATED ACCOUNTS:</b>\n"
             f"{day_history_str}\n"
             f"📊 <b>Total All-Time:</b> <b>{total_all_time} Created</b> (❌ {all_time_failed} Failed)\n"
@@ -3354,16 +3412,17 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             f"🎉 <b>Session Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
             f"⚠️ <b>Session Account Creation Failed:</b> <b>{state.get('failed_creations', 0)}</b>\n"
             f"   ├── ⏰ <b>SMS Timeout (2m):</b> <b>{state.get('failed_sms_timeout', 0)}</b>\n"
-            f"   └── 🦅 <b>Crowstack Verify Rejected:</b> <b>{state.get('failed_crowstack_verify', 0)}</b>\n"
+            f"   ├── 🦅 <b>Crowstack Verify Rejected:</b> <b>{state.get('failed_crowstack_verify', 0)}</b>{consec_str}\n"
+            f"   └── 🔄 <b>In Line for Cancel (Queue):</b> <b>{state.get('pending_cancels', 0)}</b>\n"
             f"💵 <b>Total Pool Wallet:</b> <b>₹{total_bal:.2f}</b>\n\n"
             f"{top_recommendation}"
-            f"⚡ <b>Per-Worker Performance & Balances:</b>\n{w_details}\n"
+            f"⚡ <b>Per-Worker Performance & Breakdown:</b>\n{w_details}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👇 <i>Niche button dabakar live refresh ya counter reset karein:</i>"
         )
     else:
         key_balances = []
-        max_disp = min(10, len(key_stats))
+        max_disp = min(12, len(key_stats))
         for it in key_stats[:max_disp]:
             idx = it["idx"]
             masked = it["masked"]
@@ -3379,12 +3438,24 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             key_balances.append(f"• <i>... aur {len(key_stats) - max_disp} more keys configured</i>")
         k_bal_str = "\n".join(key_balances) if key_balances else "<i>No keys configured</i>"
 
+        cfg_limit = int(cfg.get("target_limit", 0))
+        budget_block_idle = ""
+        if cfg_limit > 0:
+            est_cost = cfg_limit * 12.0
+            buf_val = total_bal - est_cost
+            buf_str = f"+₹{buf_val:.2f} ✅ (Balance Sufficient)" if buf_val >= 0 else f"-₹{abs(buf_val):.2f} ⚠️ (Deficit)"
+            budget_block_idle = (
+                f"🎯 <b>Configured Target Limit:</b> <b>{cfg_limit} Accounts</b>\n"
+                f"💰 <b>Estimated Budget:</b> ~₹{est_cost:.2f} (@ ₹12/acc) | Buffer: <b>{buf_str}</b>\n\n"
+            )
+
         stats_text = (
             f"📊 <b>BOT MASTER STATS & DAY-WISE REPORT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⚡ <b>Status:</b> ⚪ Idle (Not running)\n"
             f"🔑 <b>Configured Keys:</b> <b>{len(keys)} Keys</b>\n"
             f"🏷️ <b>Configured Servers:</b> <code>{server_names}</code>\n\n"
+            f"{budget_block_idle}"
             f"📅 <b>DAY-WISE CREATED ACCOUNTS:</b>\n"
             f"{day_history_str}\n"
             f"📊 <b>Total All-Time:</b> <b>{total_all_time} Created</b> (❌ {all_time_failed} Failed)\n"
@@ -3451,6 +3522,49 @@ def build_identity_settings_message_and_markup(chat_id: int | str):
         ]
     }
     return "\n".join(lines), kb
+
+
+async def compute_target_limit_budget_message(client: httpx.AsyncClient, chat_id: int | str, lim_val: int) -> str:
+    """Calculates live OTP Doctor wallet balance vs target limit cost (@ ₹12/account) and returns formatted budget insight."""
+    keys = get_user_api_keys(chat_id)
+    balances = await fetch_all_key_balances(client, keys)
+    total_bal = sum(parse_balance_float(v) for v in balances.values())
+
+    if lim_val <= 0:
+        return (
+            "♾️ <b>Target Limit: Unlimited (Continuous Hunt Mode)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 <b>Current Total Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
+            "<i>Bot bina kisi limit ke continuous hunting karta rahega jab tak stop na karein.</i>"
+        )
+
+    est_cost = lim_val * 12.0
+    buffer_val = total_bal - est_cost
+
+    if buffer_val >= 0:
+        return (
+            f"🎯 <b>Target Limit: {lim_val} Accounts Set!</b>\n\n"
+            f"💰 <b>Smart Auto-Budget & Wallet Management:</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Target Accounts:</b> <code>{lim_val}</code>\n"
+            f"• <b>Estimated Cost (@ ₹12/acc):</b> <b>~₹{est_cost:.2f}</b>\n"
+            f"• <b>Live Total Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
+            f"• <b>Safe Remaining Buffer:</b> <b>+₹{buffer_val:.2f}</b> ✅\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ <b>Balance is Sufficient!</b> {lim_val} accounts safe tarike se ban jayenge aur target hit hote hi bot automatically hunting stop kar dega."
+        )
+    else:
+        return (
+            f"🎯 <b>Target Limit: {lim_val} Accounts Set!</b>\n\n"
+            f"💰 <b>Smart Auto-Budget & Wallet Management:</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Target Accounts:</b> <code>{lim_val}</code>\n"
+            f"• <b>Estimated Cost (@ ₹12/acc):</b> <b>~₹{est_cost:.2f}</b>\n"
+            f"• <b>Live Total Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
+            f"• <b>Deficit / Shortfall:</b> <b>-₹{abs(buffer_val):.2f}</b> ⚠️\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Wallet Warning:</b> Total {lim_val} accounts ke liye lagbhag ₹{est_cost:.2f} lagenge, lekin abhi wallet me sirf ₹{total_bal:.2f} available hai. Beech me hunting rukne se bachne ke liye ₹{abs(buffer_val):.2f} top-up kar lein."
+        )
 
 
 def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
@@ -3611,8 +3725,9 @@ async def run_single_key_worker(
             err_detail = chk.get("error", "Both checker endpoints down")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🚨 Checker failed: {err_detail}. Queued cancel for {phone}...")
             cur_bal = await otpd_balance(client, api_key)
+            w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("CHECKER_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_detail)
-            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180, state=state, w_state=w_state)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
@@ -3624,9 +3739,10 @@ async def run_single_key_worker(
             w_state["registered"] += 1
             state["registered_count"] += 1
             cur_bal = await otpd_balance(client, api_key)
+            w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("NUMBER_CANCEL_QUEUED", phone, worker_id, current_server, cur_bal, "Registered/Old User")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Number {phone} is REGISTERED. Queued 3-min cancel with 1-min retry...")
-            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180, state=state, w_state=w_state)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
@@ -3653,6 +3769,7 @@ async def run_single_key_worker(
             await record_failed_account(phone, worker_id, current_server, key_preview, f"OTP Send Failed: {err_str}")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ OTP send failed: {err_str}. Queued cancel for refund...")
             cur_bal = await otpd_balance(client, api_key)
+            w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("OTP_SEND_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_str)
             await send_tg_message(
                 client,
@@ -3661,10 +3778,11 @@ async def run_single_key_worker(
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
                 f"⚠️ <b>Reason:</b> <code>{err_str}</code>\n"
+                f"📊 <b>Worker #{worker_id}:</b> {w_state.get('accounts', 0)} Created | {w_state.get('crowstack_rejects', 0)} Crowstack Reject | {w_state.get('timeout_fails', 0)} Timeout Fail | Bal: ₹{cur_bal}\n"
                 f"📊 <b>Total Failed in Session:</b> <b>{state.get('failed_creations', 0)}</b>\n"
                 f"🔄 Number cancel & refund queued.",
             )
-            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0, state=state, w_state=w_state)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
@@ -3679,7 +3797,7 @@ async def run_single_key_worker(
 
         while (time.time() - start_wait) < 120:
             if state.get("stop_flag") or not state.get("hunting"):
-                await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
+                await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0, state=state, w_state=w_state)
                 w_state["active_id"] = None
                 return
 
@@ -3705,11 +3823,13 @@ async def run_single_key_worker(
 
         if not otp_code:
             w_state["failed"] = w_state.get("failed", 0) + 1
+            w_state["timeout_fails"] = w_state.get("timeout_fails", 0) + 1
             state["failed_creations"] = state.get("failed_creations", 0) + 1
             state["failed_sms_timeout"] = state.get("failed_sms_timeout", 0) + 1
             await record_failed_account(phone, worker_id, current_server, key_preview, "SMS Timeout (2 Mins Elapsed)")
             print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone} (2 mins elapsed). Sending cancel request...")
             cur_bal = await otpd_balance(client, api_key)
+            w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("SMS_TIMEOUT_CANCEL", phone, worker_id, current_server, cur_bal, "2-min Timeout")
             await send_tg_message(
                 client,
@@ -3718,10 +3838,11 @@ async def run_single_key_worker(
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
                 f"⚠️ <b>Reason:</b> OTP Doctor se 2 min me SMS nahi aaya.\n"
+                f"📊 <b>Worker #{worker_id}:</b> {w_state.get('accounts', 0)} Created | {w_state.get('crowstack_rejects', 0)} Crowstack Reject | {w_state.get('timeout_fails', 0)} Timeout Fail | Bal: ₹{cur_bal}\n"
                 f"📊 <b>Session Failures:</b> Total: <b>{state.get('failed_creations', 0)}</b> | ⏰ SMS Timeout: <b>{state.get('failed_sms_timeout', 0)}</b>\n"
                 f"🔄 Number cancel & refund queued.",
             )
-            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0, state=state, w_state=w_state)
             w_state["active_id"] = None
             await asyncio.sleep(1.0)
             continue
@@ -3731,6 +3852,8 @@ async def run_single_key_worker(
         login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev, chat_id=chat_id)
 
         if login_res.get("ok"):
+            # Reset consecutive Crowstack reject counter on successful account creation
+            state["consecutive_crowstack_rejects"] = 0
             w_state["accounts"] += 1
             state["accounts_created"] += 1
             user_id = login_res.get("user_id")
@@ -3750,6 +3873,7 @@ async def run_single_key_worker(
 
             # Record in Master Account Summary File, Audit Log & DB
             cur_bal = await otpd_balance(client, api_key)
+            w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("ACCOUNT_CREATED", phone, worker_id, current_server, cur_bal, f"UID: {user_id}")
             await record_created_account(phone, user_id, current_server, worker_id, key_preview, fname)
 
@@ -3815,11 +3939,16 @@ async def run_single_key_worker(
         else:
             err_msg = login_res.get("error", "Login failed")
             w_state["failed"] = w_state.get("failed", 0) + 1
+            w_state["crowstack_rejects"] = w_state.get("crowstack_rejects", 0) + 1
             state["failed_creations"] = state.get("failed_creations", 0) + 1
             state["failed_crowstack_verify"] = state.get("failed_crowstack_verify", 0) + 1
+            state["consecutive_crowstack_rejects"] = state.get("consecutive_crowstack_rejects", 0) + 1
+            consec = state["consecutive_crowstack_rejects"]
+
             await record_failed_account(phone, worker_id, current_server, key_preview, f"Crowstack Verify Rejected: {err_msg}")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Crowstack verify failed: {err_msg}. Queued cancel...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Crowstack verify failed: {err_msg} (Consecutive: {consec}/3). Queued cancel...")
             cur_bal = await otpd_balance(client, api_key)
+            w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("LOGIN_FAILED_CANCEL", phone, worker_id, current_server, cur_bal, err_msg)
             await send_tg_message(
                 client,
@@ -3828,18 +3957,38 @@ async def run_single_key_worker(
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
                 f"⚠️ <b>Reason:</b> <code>{err_msg}</code>\n"
+                f"📊 <b>Worker #{worker_id}:</b> {w_state.get('accounts', 0)} Created | {w_state.get('crowstack_rejects', 0)} Crowstack Reject | {w_state.get('timeout_fails', 0)} Timeout Fail | Bal: ₹{cur_bal}\n"
                 f"📊 <b>Session Failures:</b> Total: <b>{state.get('failed_creations', 0)}</b> | 🦅 Verify Rejected: <b>{state.get('failed_crowstack_verify', 0)}</b>\n"
-                f"🔄 Number cancel & refund ho gaya.",
+                f"⚠️ <b>Consecutive Rejects:</b> <b>{consec}/3</b>\n"
+                f"🔄 Number cancel & refund queued.",
             )
-            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0)
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=0, state=state, w_state=w_state)
             w_state["active_id"] = None
+
+            # Auto-Stop Trigger if 3 consecutive Crowstack rejections occur
+            if consec >= 3:
+                print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] Crowstack verify rejected {consec} times consecutively! Stopping hunt...")
+                state["stop_flag"] = True
+                state["hunting"] = False
+                safety_alert = (
+                    "🛑 <b>AUTOMATIC SAFETY STOP TRIGGERED!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚠️ <b>Crowstack Verify lagatar {consec} baar REJECT ho gaya!</b>\n"
+                    "💸 OTP Doctor balance aur numbers waste hone se bachane ke liye bot ne hunting turant <b>STOP</b> kar di hai.\n\n"
+                    "🔍 <b>Likely Reason:</b>\n"
+                    "• Crowstack session expire ho gaya ya token invalid ho gaya hai\n"
+                    "• Crowstack server verification requests block kar raha hai\n\n"
+                    "👉 <i>Kripya <code>/profiles</code> se session update karein ya naya session token paste karke dobara /hunt chalayein.</i>"
+                )
+                await send_tg_message(client, chat_id, safety_alert, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                break
 
         await asyncio.sleep(1.0)
 
     # Clean up on worker exit
     act_id = w_state.get("active_id")
     if act_id:
-        await otpd_cancel(client, api_key, act_id, initial_delay=0)
+        await otpd_cancel(client, api_key, act_id, initial_delay=0, state=state, w_state=w_state)
         w_state["active_id"] = None
     w_state["status"] = "Stopped"
     print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Exited cleanly.")
@@ -3883,6 +4032,10 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
     state["registered_count"] = 0
     state["accounts_created"] = 0
     state["failed_creations"] = 0
+    state["failed_sms_timeout"] = 0
+    state["failed_crowstack_verify"] = 0
+    state["consecutive_crowstack_rejects"] = 0
+    state["pending_cancels"] = 0
     state["start_time"] = time.time()
     state["worker_states"] = {}
     state["stop_flag"] = False
@@ -3897,7 +4050,6 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
         "auto": f"🔄 Auto-Failover (Cupponhub ₹{tier} ➔ Crowstack ➔ GemixAI)",
     }
     engine_label = engine_names.get(engine, engine)
-    limit_label = f"🎯 <b>Target Limit:</b> <b>{target_limit} Accounts (Auto-Stop)</b>\n" if target_limit > 0 else "🎯 <b>Target Limit:</b> ♾️ Continuous Unlimited\n"
 
     # Parallel balance fetch for fast instant startup (even with 300+ keys)
     bal_map = await fetch_all_key_balances(client, keys, max_concurrency=30)
@@ -3918,10 +4070,25 @@ async def run_multi_hunter_task(client: httpx.AsyncClient, chat_id: int | str, t
             "accounts": 0,
             "registered": 0,
             "failed": 0,
+            "timeout_fails": 0,
+            "crowstack_rejects": 0,
+            "pending_cancels": 0,
             "status": "Starting",
             "key_preview": masked,
             "api_key": key,
+            "balance": parse_balance_float(bal),
         }
+
+    if target_limit > 0:
+        est_cost = target_limit * 12.0
+        buffer_val = total_bal - est_cost
+        buf_tag = f"+₹{buffer_val:.2f} ✅ (Balance Sufficient)" if buffer_val >= 0 else f"-₹{abs(buffer_val):.2f} ⚠️ (Deficit/Shortfall)"
+        limit_label = (
+            f"🎯 <b>Target Limit:</b> <b>{target_limit} Accounts (Auto-Stop)</b>\n"
+            f"💰 <b>Smart Budget:</b> Est. ~₹{est_cost:.2f} (@ ₹12/acc) | Buffer: <b>{buf_tag}</b>\n"
+        )
+    else:
+        limit_label = "🎯 <b>Target Limit:</b> ♾️ Continuous Unlimited\n"
 
     if len(keys) > 6:
         key_lines.append(f"<i>... aur {len(keys)-6} workers background me ready hain.</i>")
@@ -5018,14 +5185,26 @@ async def bot_loop():
                             st = ACTIVE_TASKS.setdefault(cb_chat_id, {})
                             st["manual_step"] = "awaiting_target_limit"
                             await answer_tg_callback(client, cb_id)
+                            keys_cb = get_user_api_keys(cb_chat_id)
+                            bals_cb = await fetch_all_key_balances(client, keys_cb)
+                            tot_bal_cb = sum(parse_balance_float(v) for v in bals_cb.values())
+                            possible_cb = int(tot_bal_cb // 12) if tot_bal_cb >= 12 else 0
+                            cur_lim = int(get_user_config(cb_chat_id).get("target_limit", 0))
+                            cur_lim_str = f"{cur_lim} Accounts" if cur_lim > 0 else "Unlimited"
+
                             cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
                             await send_tg_message(
                                 client,
                                 cb_chat_id,
-                                "🎯 <b>Target Account Limit Set Karein:</b>\n\n"
-                                "Kitne accounts banakar bot ko auto-stop karna hai?\n"
-                                "👉 Number type karke bhejein (jaise: <code>3</code> ya <code>5</code> ya <code>0</code> for unlimited):\n\n"
-                                "<i>(Note: In-flight ban rahe accounts safe finish hoke stop honge)</i>",
+                                f"🎯 <b>Target Account Limit & Auto-Budgeting:</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• <b>Current Target:</b> <code>{cur_lim_str}</code>\n"
+                                f"• <b>Live Total Wallet:</b> <b>₹{tot_bal_cb:.2f}</b>\n"
+                                f"• <b>Max Feasible (@ ₹12/acc):</b> <b>~{possible_cb} Accounts</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"Kitne accounts banakar bot ko auto-stop karna hai?\n"
+                                f"👉 Number type karke bhejein (jaise: <code>70</code> ya <code>3</code> ya <code>0</code> for unlimited):\n\n"
+                                f"<i>(Note: In-flight ban rahe accounts safe finish hoke stop honge)</i>",
                                 reply_markup=cancel_markup,
                             )
                             continue
@@ -6542,20 +6721,30 @@ async def bot_loop():
                             lim_val = int(parts[1])
                             update_user_config(chat_id, {"target_limit": lim_val})
                             state["target_limit"] = lim_val
+                            budget_msg = await compute_target_limit_budget_message(client, chat_id, lim_val)
                             eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
-                            lim_msg = f"🎯 <b>Target Limit set to {lim_val} Accounts!</b>" if lim_val > 0 else "♾️ <b>Target Limit: Unlimited</b>"
-                            await send_tg_message(client, chat_id, f"{lim_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                            await send_tg_message(client, chat_id, f"{budget_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
                         else:
                             state["manual_step"] = "awaiting_target_limit"
                             cancel_markup = {"keyboard": [[{"text": "❌ Cancel"}]], "resize_keyboard": True}
+                            keys_m = get_user_api_keys(chat_id)
+                            bals_m = await fetch_all_key_balances(client, keys_m)
+                            tot_bal_m = sum(parse_balance_float(v) for v in bals_m.values())
+                            possible_m = int(tot_bal_m // 12) if tot_bal_m >= 12 else 0
                             cur_lim = int(cfg.get("target_limit", 0))
+                            cur_lim_str = f"{cur_lim} Accounts" if cur_lim > 0 else "Unlimited"
+
                             await send_tg_message(
                                 client,
                                 chat_id,
-                                f"🎯 <b>Target Account Limit Set Karein:</b>\n\n"
-                                f"<b>Current Target:</b> {cur_lim if cur_lim > 0 else 'Unlimited'}\n\n"
+                                f"🎯 <b>Target Account Limit & Auto-Budgeting:</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• <b>Current Target:</b> <code>{cur_lim_str}</code>\n"
+                                f"• <b>Live Total Wallet:</b> <b>₹{tot_bal_m:.2f}</b>\n"
+                                f"• <b>Max Feasible (@ ₹12/acc):</b> <b>~{possible_m} Accounts</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"Kitne accounts banakar bot ko stop hona chahiye?\n"
-                                f"👉 Number type karke bhejein (jaise: <code>3</code> ya <code>5</code> ya <code>0</code> for unlimited):\n\n"
+                                f"👉 Number type karke bhejein (jaise: <code>70</code> ya <code>3</code> ya <code>0</code> for unlimited):\n\n"
                                 f"<i>(In-flight ban rahe accounts safe finish hoke stop honge)</i>",
                                 reply_markup=cancel_markup,
                             )
@@ -6567,9 +6756,9 @@ async def bot_loop():
                             update_user_config(chat_id, {"target_limit": lim_val})
                             state["target_limit"] = lim_val
                             state["manual_step"] = None
+                            budget_msg = await compute_target_limit_budget_message(client, chat_id, lim_val)
                             eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
-                            lim_msg = f"🎯 <b>Target Limit set to {lim_val} Accounts!</b> (Bot will safely finish in-flight accounts and stop)" if lim_val > 0 else "♾️ <b>Target Limit removed!</b> (Continuous hunt mode)"
-                            await send_tg_message(client, chat_id, f"{lim_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                            await send_tg_message(client, chat_id, f"{budget_msg}\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
                         else:
                             await send_tg_message(client, chat_id, "❌ Kripya valid number bhejein (jaise: <code>3</code> ya <code>0</code> for unlimited).")
 
