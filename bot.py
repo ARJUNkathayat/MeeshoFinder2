@@ -1410,20 +1410,9 @@ async def rescue_account_from_otp(
     if session_dict is None:
         session_dict = {"method": "crowstack", "phone": phone, "chat_id": chat_id}
 
-    if chat_id:
-        await send_tg_message(
-            client,
-            chat_id,
-            f"⚡ <b>[OTP RESCUE ACTIVATED!]</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id})\n"
-            f"🔢 <b>OTP:</b> <code>{otp_code}</code>\n"
-            f"📩 <b>SMS:</b> <code>{sms_text}</code>\n"
-            f"💸 <i>OTP Doctor ne balance deduct kiya hai — bot cancel queue se rescue karke Meesho account bana raha hai...</i>",
-        )
-
     login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev, chat_id=chat_id)
     if login_res.get("ok"):
+        print(f"[{time.strftime('%H:%M:%S')}] ✅ [OTP RESCUE SUCCESS] Rescued account created for +91{phone}!")
         if state is not None:
             state["accounts_created"] = state.get("accounts_created", 0) + 1
             state["consecutive_crowstack_rejects"] = 0
@@ -1485,42 +1474,48 @@ async def schedule_delayed_cancel(
     worker_id: int = 1,
     dev: dict = None,
     session_dict: dict = None,
+    enable_rescue: bool = True,
 ):
     """
     Automatic Cancel & Refund Manager with Real-Time OTP Rescue:
     1. Waits initial_delay (default 5 minutes / 300s) so server lock window expires.
-    2. While waiting or retrying, constantly checks if an SMS arrived on OTP Doctor.
-       If an OTP arrives, automatically RESCUES the number and creates the Meesho account
-       so no balance is ever lost!
-    3. If no OTP arrives, safely cancels and refunds the balance.
+    2. While waiting, if enable_rescue is True, checks if an SMS arrived on OTP Doctor.
+       If an unexpected late OTP arrives, automatically rescues the number once so balance is not wasted!
+    3. If Crowstack verify already rejected this number (enable_rescue=False), rescue is skipped completely
+       to avoid repeated verify attempts and message flooding.
+    4. Safely cancels and refunds the balance.
     """
     if state is not None:
         state["pending_cancels"] = state.get("pending_cancels", 0) + 1
     if w_state is not None:
         w_state["pending_cancels"] = w_state.get("pending_cancels", 0) + 1
+
+    rescue_attempted = False
     try:
-        # Check SMS during initial delay
+        # Check SMS during initial delay (only if rescue is enabled)
         start_wait = time.time()
         while (time.time() - start_wait) < initial_delay:
-            sms_res = await otpd_get_sms(client, api_key, act_id)
-            if sms_res.get("ok"):
-                sms_text = sms_res.get("sms", "")
-                digits = re.findall(r"\b\d{4,6}\b", sms_text)
-                if digits:
-                    otp_code = digits[0]
-                    rescued = await rescue_account_from_otp(
-                        client, api_key, act_id, phone, otp_code, sms_text,
-                        chat_id=chat_id, worker_id=worker_id, state=state, w_state=w_state,
-                        dev=dev, session_dict=session_dict
-                    )
-                    if rescued:
-                        return
-            await asyncio.sleep(2.0)
+            if enable_rescue and not rescue_attempted:
+                sms_res = await otpd_get_sms(client, api_key, act_id)
+                if sms_res.get("ok"):
+                    sms_text = sms_res.get("sms", "")
+                    digits = re.findall(r"\b\d{4,6}\b", sms_text)
+                    if digits:
+                        rescue_attempted = True
+                        rescued = await rescue_account_from_otp(
+                            client, api_key, act_id, phone, digits[0], sms_text,
+                            chat_id=chat_id, worker_id=worker_id, state=state, w_state=w_state,
+                            dev=dev, session_dict=session_dict
+                        )
+                        if rescued:
+                            return
+            await asyncio.sleep(3.0)
 
         attempt = 0
-        while True:
+        max_cancel_attempts = 4
+        while attempt < max_cancel_attempts:
             attempt += 1
-            print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] 🔄 Cancel Attempt #{attempt} for +91{phone} (ID: {act_id})...")
+            print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] 🔄 Cancel Attempt #{attempt}/{max_cancel_attempts} for +91{phone} (ID: {act_id})...")
             success, res_info = await otpd_cancel_attempt(client, api_key, act_id)
             if success:
                 print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ✅ Number +91{phone} (ID: {act_id}) successfully cancelled & refunded! ({res_info})")
@@ -1531,39 +1526,34 @@ async def schedule_delayed_cancel(
                     pass
                 break
 
-            # If cancel rejected, check if SMS arrived in the meantime
-            sms_res = await otpd_get_sms(client, api_key, act_id)
-            if sms_res.get("ok"):
-                sms_text = sms_res.get("sms", "")
-                digits = re.findall(r"\b\d{4,6}\b", sms_text)
-                if digits:
-                    otp_code = digits[0]
-                    rescued = await rescue_account_from_otp(
-                        client, api_key, act_id, phone, otp_code, sms_text,
-                        chat_id=chat_id, worker_id=worker_id, state=state, w_state=w_state,
-                        dev=dev, session_dict=session_dict
-                    )
-                    if rescued:
-                        return
+            res_info_str = str(res_info).upper()
+            # If OTP Doctor indicates number cannot be cancelled or status already completed, exit retry loop
+            if "CANNOT" in res_info_str or "ALREADY" in res_info_str or "STATUS_CANCEL" in res_info_str:
+                print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] Terminal notice for +91{phone}: {res_info}. Exiting cancel loop.")
+                break
 
-            print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ⚠️ Cancel rejected for +91{phone} (ID: {act_id}): {res_info}. Retrying in 30s...")
-            # Check SMS every 2s during the 30s retry window
-            retry_start = time.time()
-            while (time.time() - retry_start) < 30:
+            if attempt >= max_cancel_attempts:
+                print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] Max cancel attempts reached for +91{phone}. Exiting cancel loop.")
+                break
+
+            # If cancel rejected and rescue enabled, check SMS once
+            if enable_rescue and not rescue_attempted:
                 sms_res = await otpd_get_sms(client, api_key, act_id)
                 if sms_res.get("ok"):
                     sms_text = sms_res.get("sms", "")
                     digits = re.findall(r"\b\d{4,6}\b", sms_text)
                     if digits:
-                        otp_code = digits[0]
+                        rescue_attempted = True
                         rescued = await rescue_account_from_otp(
-                            client, api_key, act_id, phone, otp_code, sms_text,
+                            client, api_key, act_id, phone, digits[0], sms_text,
                             chat_id=chat_id, worker_id=worker_id, state=state, w_state=w_state,
                             dev=dev, session_dict=session_dict
                         )
                         if rescued:
                             return
-                await asyncio.sleep(2.0)
+
+            print(f"[{time.strftime('%H:%M:%S')}] [AutoCancel] ⚠️ Cancel rejected for +91{phone} (ID: {act_id}): {res_info}. Retrying in 20s...")
+            await asyncio.sleep(20.0)
 
     except asyncio.CancelledError:
         await otpd_cancel_attempt(client, api_key, act_id)
@@ -1588,6 +1578,7 @@ async def otpd_cancel(
     worker_id: int = 1,
     dev: dict = None,
     session_dict: dict = None,
+    enable_rescue: bool = True,
 ) -> bool:
     asyncio.create_task(
         schedule_delayed_cancel(
@@ -1602,6 +1593,7 @@ async def otpd_cancel(
             worker_id=worker_id,
             dev=dev,
             session_dict=session_dict,
+            enable_rescue=enable_rescue,
         )
     )
     return True
@@ -3930,15 +3922,8 @@ async def run_single_key_worker(
         start_wait = time.time()
 
         while (time.time() - start_wait) < 330:
-            if state.get("stop_flag") or not state.get("hunting"):
-                await otpd_cancel(
-                    client, api_key, act_id, phone=phone, initial_delay=0,
-                    state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id,
-                    dev=dev, session_dict=session_dict
-                )
-                w_state["active_id"] = None
-                return
-
+            # Do NOT abort here if stop is requested! Meesho OTP was already sent,
+            # so we must finish waiting for this in-flight number to capture SMS and prevent balance loss.
             sms_res = await otpd_get_sms(client, api_key, act_id)
             if sms_res.get("ok"):
                 sms_text = sms_res.get("sms", "")
@@ -4129,7 +4114,7 @@ async def run_single_key_worker(
                 await otpd_cancel(
                     client, api_key, act_id, phone=phone, initial_delay=0,
                     state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id,
-                    dev=dev, session_dict=session_dict
+                    dev=dev, session_dict=session_dict, enable_rescue=False
                 )
                 w_state["active_id"] = None
                 break
@@ -4139,7 +4124,7 @@ async def run_single_key_worker(
                 await otpd_cancel(
                     client, api_key, act_id, phone=phone, initial_delay=0,
                     state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id,
-                    dev=dev, session_dict=session_dict
+                    dev=dev, session_dict=session_dict, enable_rescue=False
                 )
                 w_state["active_id"] = None
                 break
@@ -4160,9 +4145,13 @@ async def run_single_key_worker(
             await otpd_cancel(
                 client, api_key, act_id, phone=phone, initial_delay=0,
                 state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id,
-                dev=dev, session_dict=session_dict
+                dev=dev, session_dict=session_dict, enable_rescue=False
             )
             w_state["active_id"] = None
+
+        if state.get("stop_flag") or not state.get("hunting"):
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Hunt stop detected. In-flight number completed. Exiting worker cleanly.")
+            break
 
         await asyncio.sleep(1.0)
 
