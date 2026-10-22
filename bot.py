@@ -1478,7 +1478,7 @@ async def schedule_delayed_cancel(
     api_key: str,
     act_id: str,
     phone: str = "",
-    initial_delay: int = 180,
+    initial_delay: int = 300,
     state: dict = None,
     w_state: dict = None,
     chat_id: int | str = None,
@@ -1488,7 +1488,7 @@ async def schedule_delayed_cancel(
 ):
     """
     Automatic Cancel & Refund Manager with Real-Time OTP Rescue:
-    1. Waits initial_delay (default 3 minutes / 180s) so server lock window expires.
+    1. Waits initial_delay (default 5 minutes / 300s) so server lock window expires.
     2. While waiting or retrying, constantly checks if an SMS arrived on OTP Doctor.
        If an OTP arrives, automatically RESCUES the number and creates the Meesho account
        so no balance is ever lost!
@@ -1581,7 +1581,7 @@ async def otpd_cancel(
     api_key: str,
     act_id: str,
     phone: str = "",
-    initial_delay: int = 180,
+    initial_delay: int = 300,
     state: dict = None,
     w_state: dict = None,
     chat_id: int | str = None,
@@ -2217,31 +2217,12 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
             else:
                 err_msg = (data.get("error") or data.get("message") or raw_text) if data else raw_text
                 crowstack_errors.append(f"{prof_name}: {err_msg} (HTTP {resp.status_code})")
-                print(f"[Crowstack {prof_name} rejected]: {err_msg}")
-                if chat_id:
-                    err_preview = raw_text[:800] if raw_text else f"HTTP {resp.status_code}"
-                    await send_tg_message(
-                        client,
-                        chat_id,
-                        f"⚠️ <b>[Crowstack Response] send-otp REJECTED!</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📊 <b>HTTP Status:</b> <code>{resp.status_code}</code>\n"
-                        f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
-                        f"❌ <b>Server Response:</b>\n<pre><code>{err_preview}</code></pre>",
-                    )
+                print(f"[{time.strftime('%H:%M:%S')}] [Crowstack {prof_name} send-otp rejected]: {err_msg}")
         except Exception as e:
             crowstack_errors.append(f"{prof_name}: {e}")
-            print(f"[Crowstack {prof_key} error]: {e}")
-            if chat_id:
-                await send_tg_message(
-                    client,
-                    chat_id,
-                    f"🚨 <b>[Crowstack Network Exception]</b>\n"
-                    f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
-                    f"⚠️ <code>{e}</code>",
-                )
+            print(f"[{time.strftime('%H:%M:%S')}] [Crowstack {prof_key} send-otp error]: {e}")
 
-    print(f"[Crowstack Failover] All Crowstack sessions failed for +91{phone}: {crowstack_errors}")
+    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack Failover] All Crowstack sessions failed for +91{phone}: {crowstack_errors}")
     if chat_id:
         await send_tg_message(
             client,
@@ -2339,26 +2320,12 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                     }
                 else:
                     err = (data.get("error") or data.get("message") or raw_text) if data else raw_text
-                    print(f"[Crowstack verify rejected with {p_k}]: {err}")
-                    if cid:
-                        err_preview = raw_text[:800] if raw_text else f"HTTP {resp.status_code}"
-                        await send_tg_message(
-                            client,
-                            cid,
-                            f"❌ <b>[Crowstack Response] verify REJECTED!</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"📊 <b>HTTP Status:</b> <code>{resp.status_code}</code>\n"
-                            f"👤 <b>Session:</b> <code>{prof_name}</code>\n"
-                            f"⚠️ <b>Server Response:</b>\n<pre><code>{err_preview}</code></pre>",
-                        )
+                    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack {prof_name} verify rejected]: {err} (HTTP {resp.status_code})")
             except Exception as e:
-                print(f"[Crowstack verify error with {p_k}]: {e}")
-                if cid:
-                    await send_tg_message(client, cid, f"🚨 <b>[Crowstack Verify Exception]:</b> <code>{e}</code>")
+                print(f"[{time.strftime('%H:%M:%S')}] [Crowstack {p_k} verify error]: {e}")
 
-        if cid:
-            await send_tg_message(client, cid, f"❌ <b>[Crowstack Verify] All 3 sessions (Rem, Marin & Marin123) failed for +91{phone}!</b>")
-        return {"ok": False, "error": "Crowstack verify failed across all 3 sessions.", "fail_type": "crowstack_verify"}
+        print(f"[{time.strftime('%H:%M:%S')}] [Crowstack Verify] All sessions failed for +91{phone}")
+        return {"ok": False, "error": "Crowstack verify failed across all sessions.", "fail_type": "crowstack_verify"}
 
     # Method 2: Hidenfree
     if session.get("method") == "hidenfree":
@@ -3885,7 +3852,7 @@ async def run_single_key_worker(
             w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("CHECKER_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_detail)
             await otpd_cancel(
-                client, api_key, act_id, phone=phone, initial_delay=180,
+                client, api_key, act_id, phone=phone, initial_delay=300,
                 state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id
             )
             w_state["active_id"] = None
@@ -3894,16 +3861,16 @@ async def run_single_key_worker(
 
         is_reg = chk.get("registered")
 
-        # ── Registered (Old User) → 3 min delayed cancel with 1 min retry, worker continues hunting! ──
+        # ── Registered (Old User) → 5 min delayed cancel with 1 min retry, worker continues hunting! ──
         if is_reg is True:
             w_state["registered"] += 1
             state["registered_count"] += 1
             cur_bal = await otpd_balance(client, api_key)
             w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("NUMBER_CANCEL_QUEUED", phone, worker_id, current_server, cur_bal, "Registered/Old User")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Number {phone} is REGISTERED. Queued 3-min cancel with 1-min retry...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] Number {phone} is REGISTERED. Queued 5-min cancel with 1-min retry...")
             await otpd_cancel(
-                client, api_key, act_id, phone=phone, initial_delay=180,
+                client, api_key, act_id, phone=phone, initial_delay=300,
                 state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id
             )
             w_state["active_id"] = None
@@ -3919,7 +3886,7 @@ async def run_single_key_worker(
             f"📱 <b>Mobile:</b> <code>+91{phone}</code>\n"
             f"⚡ <b>Worker:</b> <code>Worker #{worker_id}</code> (Key: <code>{key_preview}</code>)\n"
             f"🏷️ <b>Server:</b> <code>Server {current_server}</code>\n"
-            f"📩 <b>Action:</b> Meesho Official OTP bheja jaa raha hai (Max wait: 2 mins)..."
+            f"📩 <b>Action:</b> Meesho Official OTP bheja jaa raha hai (Max wait: 5.5 mins)..."
         )
         await send_tg_message(client, chat_id, fresh_alert_msg)
 
@@ -3955,14 +3922,14 @@ async def run_single_key_worker(
             continue
 
         session_dict = otp_res["session"]
-        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ OTP sent to {phone}! Waiting for SMS (max 2 mins)...")
+        print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ OTP sent to {phone}! Waiting for SMS (max 5.5 mins)...")
 
-        # Poll OTP Doctor for incoming SMS (Max 2 minutes = 120 seconds)
+        # Poll OTP Doctor for incoming SMS (Max 5.5 minutes = 330 seconds)
         otp_code = None
         sms_text = ""
         start_wait = time.time()
 
-        while (time.time() - start_wait) < 120:
+        while (time.time() - start_wait) < 330:
             if state.get("stop_flag") or not state.get("hunting"):
                 await otpd_cancel(
                     client, api_key, act_id, phone=phone, initial_delay=0,
@@ -3997,24 +3964,24 @@ async def run_single_key_worker(
             w_state["timeout_fails"] = w_state.get("timeout_fails", 0) + 1
             state["failed_creations"] = state.get("failed_creations", 0) + 1
             state["failed_sms_timeout"] = state.get("failed_sms_timeout", 0) + 1
-            await record_failed_account(phone, worker_id, current_server, key_preview, "SMS Timeout (2 Mins Elapsed)")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone} (2 mins elapsed). Sending cancel request...")
+            await record_failed_account(phone, worker_id, current_server, key_preview, "SMS Timeout (5.5 Mins Elapsed)")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏰ SMS Timeout for {phone} (5.5 mins elapsed). Sending cancel request...")
             cur_bal = await otpd_balance(client, api_key)
             w_state["balance"] = parse_balance_float(cur_bal)
-            await record_transaction("SMS_TIMEOUT_CANCEL", phone, worker_id, current_server, cur_bal, "2-min Timeout")
+            await record_transaction("SMS_TIMEOUT_CANCEL", phone, worker_id, current_server, cur_bal, "5.5-min Timeout")
             await send_tg_message(
                 client,
                 chat_id,
                 f"⏰ <b>[Account Creation Failed — SMS Timeout]</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📱 <b>Mobile:</b> <code>+91{phone}</code> (Worker #{worker_id} | Key: <code>{key_preview}</code>)\n"
-                f"⚠️ <b>Reason:</b> OTP Doctor se 2 min me SMS nahi aaya.\n"
+                f"⚠️ <b>Reason:</b> OTP Doctor se 5.5 min me SMS nahi aaya.\n"
                 f"📊 <b>Worker #{worker_id}:</b> {w_state.get('accounts', 0)} Created | {w_state.get('crowstack_rejects', 0)} Crowstack Reject | {w_state.get('timeout_fails', 0)} Timeout Fail | Bal: ₹{cur_bal}\n"
                 f"📊 <b>Session Failures:</b> Total: <b>{state.get('failed_creations', 0)}</b> | ⏰ SMS Timeout: <b>{state.get('failed_sms_timeout', 0)}</b>\n"
                 f"🔄 Number cancel & refund queued.",
             )
             await otpd_cancel(
-                client, api_key, act_id, phone=phone, initial_delay=0,
+                client, api_key, act_id, phone=phone, initial_delay=300,
                 state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id,
                 dev=dev, session_dict=session_dict
             )
@@ -4134,6 +4101,50 @@ async def run_single_key_worker(
             cur_bal = await otpd_balance(client, api_key)
             w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("LOGIN_FAILED_CANCEL", phone, worker_id, current_server, cur_bal, err_msg)
+
+            # Check Auto-Stop triggers first to prevent message flood across workers
+            auto_stop_reason = None
+            if max_tot > 0 and tot_rej >= max_tot:
+                auto_stop_reason = f"Total Crowstack Verify Rejections Limit Hit: {tot_rej}/{max_tot}!"
+            elif max_consec > 0 and consec >= max_consec:
+                auto_stop_reason = f"Crowstack Verify lagatar {consec}/{max_consec} baar REJECT ho gaya!"
+
+            if auto_stop_reason:
+                if not state.get("stop_flag"):
+                    state["stop_flag"] = True
+                    state["hunting"] = False
+                    print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] {auto_stop_reason} Stopping hunt...")
+                    safety_alert = (
+                        "🛑 <b>AUTOMATIC SAFETY STOP TRIGGERED!</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"⚠️ <b>{auto_stop_reason}</b>\n"
+                        "💸 OTP Doctor balance aur numbers waste hone se bachane ke liye bot ne hunting turant <b>STOP</b> kar di hai.\n\n"
+                        "🔍 <b>Likely Reason:</b>\n"
+                        "• Crowstack session expire ho gaya ya token invalid ho gaya hai\n"
+                        "• Crowstack server verification requests block kar raha hai\n\n"
+                        "👉 <i>Limit change karne ke liye <code>/maxrejects &lt;N&gt;</code> bhejein ya <code>/profiles</code> se session update karke dobara /hunt chalayein.</i>"
+                    )
+                    await send_tg_message(client, chat_id, safety_alert, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+
+                await otpd_cancel(
+                    client, api_key, act_id, phone=phone, initial_delay=0,
+                    state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id,
+                    dev=dev, session_dict=session_dict
+                )
+                w_state["active_id"] = None
+                break
+
+            # If hunt is already stopped, cancel number and exit silently without message flooding
+            if state.get("stop_flag") or not state.get("hunting"):
+                await otpd_cancel(
+                    client, api_key, act_id, phone=phone, initial_delay=0,
+                    state=state, w_state=w_state, chat_id=chat_id, worker_id=worker_id,
+                    dev=dev, session_dict=session_dict
+                )
+                w_state["active_id"] = None
+                break
+
+            # Normal single rejection alert (only when hunting is still running)
             await send_tg_message(
                 client,
                 chat_id,
@@ -4152,42 +4163,6 @@ async def run_single_key_worker(
                 dev=dev, session_dict=session_dict
             )
             w_state["active_id"] = None
-
-            # Auto-Stop Trigger 1: Total Crowstack Rejections Limit reached
-            if max_tot > 0 and tot_rej >= max_tot:
-                print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] Total Crowstack verify rejections reached {tot_rej}/{max_tot}! Stopping hunt...")
-                state["stop_flag"] = True
-                state["hunting"] = False
-                safety_alert = (
-                    "🛑 <b>AUTOMATIC SAFETY STOP TRIGGERED!</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⚠️ <b>Total Crowstack Verify Rejections Limit Hit: {tot_rej}/{max_tot}!</b>\n"
-                    "💸 OTP Doctor balance aur numbers waste hone se bachane ke liye bot ne hunting turant <b>STOP</b> kar di hai.\n\n"
-                    "🔍 <b>Likely Reason:</b>\n"
-                    "• Crowstack session expire ho gaya ya token invalid ho gaya hai\n"
-                    "• Crowstack server verification requests block kar raha hai\n\n"
-                    "👉 <i>Limit change karne ke liye <code>/maxrejects &lt;N&gt;</code> bhejein ya <code>/profiles</code> se session update karke dobara /hunt chalayein.</i>"
-                )
-                await send_tg_message(client, chat_id, safety_alert, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
-                break
-
-            # Auto-Stop Trigger 2: Consecutive Crowstack Rejections Limit reached
-            elif max_consec > 0 and consec >= max_consec:
-                print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] Crowstack verify rejected {consec}/{max_consec} times consecutively! Stopping hunt...")
-                state["stop_flag"] = True
-                state["hunting"] = False
-                safety_alert = (
-                    "🛑 <b>AUTOMATIC SAFETY STOP TRIGGERED!</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⚠️ <b>Crowstack Verify lagatar {consec}/{max_consec} baar REJECT ho gaya!</b>\n"
-                    "💸 OTP Doctor balance aur numbers waste hone se bachane ke liye bot ne hunting turant <b>STOP</b> kar di hai.\n\n"
-                    "🔍 <b>Likely Reason:</b>\n"
-                    "• Crowstack session expire ho gaya ya token invalid ho gaya hai\n"
-                    "• Crowstack server verification requests block kar raha hai\n\n"
-                    "👉 <i>Limit change karne ke liye <code>/consecutive &lt;N&gt;</code> bhejein ya <code>/profiles</code> se session update karke dobara /hunt chalayein.</i>"
-                )
-                await send_tg_message(client, chat_id, safety_alert, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
-                break
 
         await asyncio.sleep(1.0)
 
