@@ -1732,8 +1732,8 @@ async def cupponhub_verify_otp(client: httpx.AsyncClient, session_id: str, otp: 
         return {"ok": False, "error": f"Cupponhub verify exception: {e}"}
 
 
-# ─── Web Registration Checker (Speedz Checker Multi-Key + Crowstack Fallback) ──
-async def check_meesho_reg(client: httpx.AsyncClient, phone: str, chat_id: int | str = None) -> dict:
+# ─── Web Registration Checker (Speedz Checker Multi-Key with Rate-Limit Auto-Wait) ──
+async def check_meesho_reg(client: httpx.AsyncClient, phone: str, chat_id: int | str = None, max_retries: int = 6) -> dict:
     clean_num = clean_phone(phone)
 
     # Pure Speedz Read-Only Checker (ZERO SMS dispatched, 100% safe for balance)
@@ -1742,34 +1742,54 @@ async def check_meesho_reg(client: httpx.AsyncClient, phone: str, chat_id: int |
         pool = [DEFAULT_SPEEDZ_KEY]
 
     last_err = "No Speedz keys available"
-    for sp_key in pool:
-        try:
-            headers = {"X-API-Key": sp_key, "Content-Type": "application/json"}
-            sp_res = await client.post(
-                f"{SPEEDZ_BASE_URL}/check",
-                headers=headers,
-                json={"service": "meesho", "number": clean_num},
-                timeout=8,
-            )
-            if sp_res.status_code == 200:
-                data = sp_res.json() or {}
-                if data.get("success") and "is_registered" in data:
-                    is_reg = bool(data["is_registered"])
-                    return {
-                        "registered": is_reg,
-                        "fresh": not is_reg,
-                        "ok": True,
-                        "error": None,
-                        "source": f"speedz ({sp_key[:8]}...)",
-                    }
-            elif sp_res.status_code == 429:
-                last_err = f"Speedz key {sp_key[:8]}... rate limit 429"
+    for attempt in range(1, max_retries + 1):
+        rate_limited = False
+        suggested_wait = 4.0
+
+        for sp_key in pool:
+            try:
+                headers = {"X-API-Key": sp_key, "Content-Type": "application/json"}
+                sp_res = await client.post(
+                    f"{SPEEDZ_BASE_URL}/check",
+                    headers=headers,
+                    json={"service": "meesho", "number": clean_num},
+                    timeout=8,
+                )
+                if sp_res.status_code == 200:
+                    data = sp_res.json() or {}
+                    if data.get("success") and "is_registered" in data:
+                        is_reg = bool(data["is_registered"])
+                        return {
+                            "registered": is_reg,
+                            "fresh": not is_reg,
+                            "ok": True,
+                            "error": None,
+                            "source": f"speedz ({sp_key[:8]}...)",
+                        }
+                elif sp_res.status_code == 429:
+                    rate_limited = True
+                    retry_hdr = sp_res.headers.get("Retry-After")
+                    if retry_hdr and retry_hdr.isdigit():
+                        suggested_wait = max(suggested_wait, min(float(retry_hdr), 10.0))
+                    last_err = f"Speedz key {sp_key[:8]}... rate limit 429"
+                    continue
+                else:
+                    last_err = f"Speedz HTTP {sp_res.status_code}"
+            except Exception as e:
+                last_err = f"Speedz error: {e}"
                 continue
-            else:
-                last_err = f"Speedz HTTP {sp_res.status_code}"
-        except Exception as e:
-            last_err = f"Speedz error: {e}"
+
+        # If Speedz keys hit 429 rate limit, wait and retry instead of cancelling the number!
+        if rate_limited and attempt < max_retries:
+            print(f"[{time.strftime('%H:%M:%S')}] ⏳ [Speedz Rate Limit] Keys hit 429. Waiting {suggested_wait:.1f}s before retry ({attempt}/{max_retries}) for {clean_num}...")
+            await asyncio.sleep(suggested_wait)
             continue
+        elif not rate_limited:
+            # If temporary network glitch, retry once after 1.5s
+            if attempt < 2:
+                await asyncio.sleep(1.5)
+                continue
+            break
 
     # Note: Crowstack /send-otp has been permanently REMOVED from checking logic
     # because it sends real SMS OTPs and burns OTP Doctor balance without user knowledge.
@@ -3112,14 +3132,23 @@ async def mine_and_deliver_order(client: httpx.AsyncClient, order_id: str):
         act_id = res["id"]
         phone = res["phone"]
 
-        chk = await check_meesho_reg(client, phone)
-        if not chk.get("ok"):
-            await asyncio.sleep(2)
+        # Check registration with patient Speedz Rate Limit handling
+        chk = None
+        check_start = time.time()
+        while (time.time() - check_start) < 90:
             chk = await check_meesho_reg(client, phone)
+            if chk.get("ok"):
+                break
+            err_detail = str(chk.get("error", ""))
+            if "429" in err_detail or "rate limit" in err_detail.lower():
+                print(f"[OrderDelivery] ⏳ Speedz rate limit for +91{phone}. Waiting 5s before re-checking...")
+                await asyncio.sleep(5.0)
+            else:
+                await asyncio.sleep(2.0)
 
-        if chk.get("registered") is True or not chk.get("ok"):
-            print(f"[OrderDelivery] Phone {phone} is registered or check failed. Cancelling...")
-            await otpd_cancel(client, api_key, act_id)
+        if not chk or chk.get("registered") is True or not chk.get("ok"):
+            print(f"[OrderDelivery] Phone {phone} is registered or check failed after wait. Cancelling...")
+            await otpd_cancel(client, api_key, act_id, phone=phone, initial_delay=180)
             await asyncio.sleep(4)
             continue
 
@@ -3829,14 +3858,29 @@ async def run_single_key_worker(
         await record_transaction("NUMBER_BOUGHT", phone, worker_id, current_server, cur_bal, f"Key: {key_preview} (Race Win)")
         print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⚡ Server {current_server} won! Got number: {phone} (ID: {act_id}, Bal: ₹{cur_bal}) — checking registration...")
 
-        chk = await check_meesho_reg(client, phone, chat_id=chat_id)
-        if not chk.get("ok"):
-            await asyncio.sleep(1.0)
-            chk = await check_meesho_reg(client, phone, chat_id=chat_id)
+        # ── Check registration with patient Speedz Rate Limit handling ──
+        chk = None
+        check_start = time.time()
+        max_check_time = 120  # Keep checking for up to 2 minutes on rate limit before cancelling
 
-        if not chk.get("ok"):
-            err_detail = chk.get("error", "Both checker endpoints down")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🚨 Checker failed: {err_detail}. Queued cancel for {phone}...")
+        while (time.time() - check_start) < max_check_time:
+            if state.get("stop_flag") or not state.get("hunting"):
+                break
+
+            chk = await check_meesho_reg(client, phone, chat_id=chat_id)
+            if chk.get("ok"):
+                break
+
+            err_detail = str(chk.get("error", ""))
+            if "429" in err_detail or "rate limit" in err_detail.lower():
+                print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ⏳ Speedz rate limit active for +91{phone}. Waiting 5s for cooldown before checking again...")
+                await asyncio.sleep(5.0)
+            else:
+                await asyncio.sleep(2.0)
+
+        if not chk or not chk.get("ok"):
+            err_detail = chk.get("error", "Speedz checker unreachable") if chk else "Timeout waiting for Speedz"
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🚨 Checker failed after wait: {err_detail}. Queued cancel for {phone}...")
             cur_bal = await otpd_balance(client, api_key)
             w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("CHECKER_FAIL_CANCEL", phone, worker_id, current_server, cur_bal, err_detail)
