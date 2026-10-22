@@ -4576,6 +4576,133 @@ async def convert_and_send_json(client: httpx.AsyncClient, chat_id: int | str, c
         )
 
 
+# ─── Automatic Keys File Parser & Importer (OTP Doctor & Speedz) ───────────────
+async def handle_keys_file_upload(client: httpx.AsyncClient, chat_id: int | str, doc: dict, state: dict = None) -> bool:
+    """Automatically downloads, parses and imports OTP Doctor and Speedz keys from any uploaded file."""
+    try:
+        file_id = doc.get("file_id")
+        if not file_id:
+            return False
+
+        f_res = await client.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=10,
+        )
+        if f_res.status_code != 200:
+            return False
+        f_path = f_res.json().get("result", {}).get("file_path")
+        if not f_path:
+            return False
+
+        dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=25)
+        file_content = dl_res.text.strip()
+        if not file_content:
+            return False
+
+        fname = doc.get("file_name", "keys.txt").lower()
+
+        # If file is a Meesho session account JSON, don't hijack it as keys
+        if fname.endswith(".json") and ("session_token" in file_content or "instance_id" in file_content or "cookies" in file_content):
+            return False
+
+        cfg = get_user_config(chat_id)
+
+        speedz_keys_found = []
+        otpd_keys_found = []
+
+        # 1. Regex find all explicit Speedz keys starting with AK_
+        explicit_speedz = re.findall(r"\bAK_[a-zA-Z0-9_\-]{10,80}\b", file_content)
+        for sk in explicit_speedz:
+            if sk not in speedz_keys_found:
+                speedz_keys_found.append(sk)
+
+        # 2. Parse lines for labelled keys or raw keys
+        lines = [ln.strip() for ln in re.split(r"[\r\n,;]+", file_content) if ln.strip()]
+        for line in lines:
+            line_str = line.strip().strip('"').strip("'")
+            if ":" in line_str or "=" in line_str:
+                sep = ":" if ":" in line_str else "="
+                parts = [p.strip().strip('"').strip("'") for p in line_str.split(sep, 1)]
+                label = parts[0].lower()
+                val = parts[1].strip()
+                if "speed" in label:
+                    if len(val) >= 15 and val not in speedz_keys_found:
+                        speedz_keys_found.append(val)
+                    continue
+                elif "otp" in label or "doc" in label or "api_key" in label:
+                    if len(val) >= 15 and val not in otpd_keys_found and not val.startswith("AK_"):
+                        otpd_keys_found.append(val)
+                    continue
+
+            # Check individual tokens
+            tokens = re.findall(r"[a-zA-Z0-9_\-]{16,80}", line_str)
+            for tok in tokens:
+                if tok.startswith("AK_"):
+                    if tok not in speedz_keys_found:
+                        speedz_keys_found.append(tok)
+                elif "speedz" in fname:
+                    if tok not in speedz_keys_found:
+                        speedz_keys_found.append(tok)
+                else:
+                    if tok not in otpd_keys_found and not tok.startswith("http") and not tok.isdigit():
+                        otpd_keys_found.append(tok)
+
+        if not speedz_keys_found and not otpd_keys_found:
+            return False
+
+        # Apply Speedz keys
+        added_sp_count = 0
+        if speedz_keys_found:
+            cur_sp = cfg.get("speedz_keys", [])
+            if not isinstance(cur_sp, list):
+                cur_sp = []
+            for sk in speedz_keys_found:
+                if sk not in cur_sp and sk != DEFAULT_SPEEDZ_KEY:
+                    cur_sp.append(sk)
+                    added_sp_count += 1
+            update_user_config(chat_id, {"speedz_keys": cur_sp})
+            save_saved_speedz_keys_global(cur_sp)
+
+        # Apply OTP Doctor keys
+        added_otpd_count = 0
+        if otpd_keys_found:
+            added_otpd = add_user_api_keys_bulk(chat_id, otpd_keys_found)
+            added_otpd_count = len(added_otpd)
+
+        total_sp = len(get_speedz_keys_pool(chat_id))
+        total_otpd = len(get_user_api_keys(chat_id))
+
+        status_lines = []
+        if added_otpd_count > 0:
+            status_lines.append(f"🩺 <b>OTP Doctor Keys Added:</b> <b>+{added_otpd_count}</b> (Active Total: <b>{total_otpd}</b>)")
+        elif otpd_keys_found:
+            status_lines.append(f"🩺 <b>OTP Doctor Keys:</b> Already saved (Active Total: <b>{total_otpd}</b>)")
+
+        if added_sp_count > 0:
+            status_lines.append(f"⚡ <b>Speedz Checker Keys Added:</b> <b>+{added_sp_count}</b> (Active Pool: <b>{total_sp}</b>)")
+        elif speedz_keys_found:
+            status_lines.append(f"⚡ <b>Speedz Checker Keys:</b> Already saved (Active Pool: <b>{total_sp}</b>)")
+
+        summary_body = "\n".join(status_lines)
+        keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
+
+        msg_out = (
+            f"📄 <b>API KEYS FILE AUTO-IMPORTED!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📥 <b>File:</b> <code>{doc.get('file_name', 'keys.txt')}</code>\n\n"
+            f"{summary_body}\n\n"
+            f"✅ <i>File se keys auto-read aur save ho gayi hain, copy-paste karne ki zaroorat nahi padi!</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{keys_text}"
+        )
+        await send_tg_message(client, chat_id, msg_out, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+        return True
+    except Exception as e:
+        print(f"[handle_keys_file_upload Error] {e}")
+        return False
+
+
 # ─── Telegram Bot Polling Loop (Dual-Mode: User Store & Admin Hunter) ─────────
 async def bot_loop():
     print(f"[{time.strftime('%H:%M:%S')}] 🤖 Multi-Server Meesho Bot Started! (@BotFather verified)", flush=True)
@@ -6521,19 +6648,14 @@ async def bot_loop():
                             )
 
                     elif state.get("manual_step") in ("awaiting_add_key", "awaiting_bulk_keys"):
-                        content = text
                         doc = msg.get("document")
                         if doc and doc.get("file_id"):
-                            try:
-                                f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
-                                if f_res.status_code == 200:
-                                    f_path = f_res.json().get("result", {}).get("file_path")
-                                    if f_path:
-                                        dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
-                                        content = dl_res.text
-                            except Exception as e:
-                                print(f"[Keys File Import Error] {e}")
+                            handled = await handle_keys_file_upload(client, chat_id, doc, state)
+                            if handled:
+                                state["manual_step"] = None
+                                continue
 
+                        content = text
                         cand_keys = re.findall(r"[a-zA-Z0-9_\-]{8,128}", content)
                         if len(cand_keys) > 1:
                             added = add_user_api_keys_bulk(chat_id, cand_keys)
@@ -6567,30 +6689,12 @@ async def bot_loop():
                         else:
                             await send_tg_message(client, chat_id, "❌ Koi valid API keys detect nahi hui. Kripya valid key string paste karein.")
 
-                    # Auto-detect uploaded .txt document for API Keys import if sent directly
-                    elif msg.get("document") and msg["document"].get("file_name", "").endswith(".txt") and not state.get("hunting"):
+                    # Auto-detect uploaded document/file for OTP Doctor and Speedz Keys import if sent directly
+                    elif msg.get("document") and not state.get("hunting") and not state.get("awaiting_custom_delivery_order") and state.get("manual_step") != "awaiting_convert_json":
                         doc = msg.get("document")
-                        try:
-                            f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
-                            if f_res.status_code == 200:
-                                f_path = f_res.json().get("result", {}).get("file_path")
-                                if f_path:
-                                    dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
-                                    file_content = dl_res.text
-                                    extracted_keys = re.findall(r"[a-zA-Z0-9_\-]{8,128}", file_content)
-                                    if extracted_keys:
-                                        added = add_user_api_keys_bulk(chat_id, extracted_keys)
-                                        keys_text, keys_kb = await build_keys_view_message_and_markup(client, chat_id)
-                                        await send_tg_message(
-                                            client,
-                                            chat_id,
-                                            f"📄 <b>Keys Text File Auto-Imported!</b>\n\n"
-                                            f"📥 <b>File:</b> <code>{doc.get('file_name')}</code>\n"
-                                            f"✅ <b>Loaded:</b> {added} keys\n\n{keys_text}",
-                                            reply_markup=ADMIN_MAIN_MENU_KEYBOARD,
-                                        )
-                        except Exception as doc_e:
-                            print(f"[Txt Doc Import Error] {doc_e}")
+                        handled = await handle_keys_file_upload(client, chat_id, doc, state)
+                        if handled:
+                            continue
 
                     elif state.get("manual_step") == "awaiting_del_key":
                         del_target = text.strip()
@@ -6758,19 +6862,14 @@ async def bot_loop():
 
                     # ── 🔍 Speedz Checker Keys Management (/speedzkeys, /addspeedz, /exportspeedz, /clearspeedz) ──
                     elif state.get("manual_step") == "awaiting_speedz_bulk":
-                        content = text
                         doc = msg.get("document")
                         if doc and doc.get("file_id"):
-                            try:
-                                f_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": doc["file_id"]}, timeout=10)
-                                if f_res.status_code == 200:
-                                    f_path = f_res.json().get("result", {}).get("file_path")
-                                    if f_path:
-                                        dl_res = await client.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f_path}", timeout=20)
-                                        content = dl_res.text
-                            except Exception as e:
-                                print(f"[Speedz File Import Error] {e}")
+                            handled = await handle_keys_file_upload(client, chat_id, doc, state)
+                            if handled:
+                                state["manual_step"] = None
+                                continue
 
+                        content = text
                         new_keys = re.findall(r"[a-zA-Z0-9_\-]{15,100}", content)
                         state["manual_step"] = None
                         if new_keys:
