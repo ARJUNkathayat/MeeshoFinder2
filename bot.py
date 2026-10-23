@@ -604,6 +604,29 @@ FAILED_ACCOUNTS_LOCK = asyncio.Lock()
 FAILED_ACCOUNTS_FILE = "failed_accounts_history.json"
 FAILED_ACCOUNTS_TXT = os.path.join("accounts", "failed_accounts_summary.txt")
 
+GLOBAL_STATS_FILE = "global_stats.json"
+
+
+def get_global_crowstack_rejects() -> int:
+    try:
+        if os.path.exists(GLOBAL_STATS_FILE):
+            with open(GLOBAL_STATS_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                return int(d.get("total_crowstack_rejects", 0))
+    except Exception:
+        pass
+    return 0
+
+
+def increment_global_crowstack_rejects() -> int:
+    cnt = get_global_crowstack_rejects() + 1
+    try:
+        with open(GLOBAL_STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"total_crowstack_rejects": cnt, "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")}, f, indent=2)
+    except Exception as e:
+        print(f"[GlobalStats Save Error] {e}")
+    return cnt
+
 TRANSACTIONS_LOCK = asyncio.Lock()
 TRANSACTIONS_HISTORY_FILE = "transactions_history.json"
 TRANSACTIONS_LOG_TXT = os.path.join("accounts", "transactions_log.txt")
@@ -2245,25 +2268,24 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
 
     # Method 2: Crowstack
     if method == "crowstack":
+        # Always verify on the EXACT session that requested/sent the OTP
         prof_key = session.get("profile", get_crowstack_profile_key(cid))
-        # Ensure all 3 sessions are attempted in order
-        profiles_to_try = [prof_key]
-        for candidate in ("new", "main", "session3"):
-            if candidate not in profiles_to_try:
-                profiles_to_try.append(candidate)
+        p_info = CROWSTACK_PROFILES.get(prof_key, CROWSTACK_PROFILES["new"])
+        prof_name = p_info["name"]
 
-        for p_k in profiles_to_try:
+        headers = get_crowstack_headers(cid)
+        headers["User-Agent"] = p_info["user_agent"]
+        headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
+        headers["sec-ch-ua"] = p_info["sec_ch_ua"]
+        headers["sec-ch-ua-platform"] = p_info.get("sec_ch_ua_platform", '"Windows"')
+
+        payload = {"otp": otp}
+        max_verify_attempts = 3
+        last_err = "Crowstack verify failed"
+
+        for attempt in range(1, max_verify_attempts + 1):
             try:
-                p_info = CROWSTACK_PROFILES.get(p_k, CROWSTACK_PROFILES["new"])
-                prof_name = p_info["name"]
-                headers = get_crowstack_headers(cid)
-                headers["User-Agent"] = p_info["user_agent"]
-                headers["X-Tg-Init-Data"] = p_info["x_tg_init_data"]
-                headers["sec-ch-ua"] = p_info["sec_ch_ua"]
-                headers["sec-ch-ua-platform"] = p_info.get("sec_ch_ua_platform", '"Windows"')
-
-                payload = {"otp": otp}
-                print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] Verifying OTP {otp} for +91{phone} via {prof_name}...")
+                print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] Verifying OTP {otp} for +91{phone} via {prof_name} (Attempt #{attempt}/{max_verify_attempts})...")
                 resp = await client.post(
                     f"{CROWSTACK_BASE}/verify",
                     headers=headers,
@@ -2279,7 +2301,11 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
 
                 if resp.status_code == 200 and data and data.get("ok"):
                     acc = data.get("account", {})
-                    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] ✅ Verify SUCCESS via {prof_name} for +91{phone}!")
+                    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] ✅ Verify SUCCESS via {prof_name} for +91{phone} (Attempt #{attempt})!")
+
+                    # Wait 5 seconds before calling export_file so Crowstack backend generator syncs latest account
+                    print(f"[{time.strftime('%H:%M:%S')}] ⏳ Waiting 5s before calling export_file to ensure fresh account sync (prevents duplicate number export)...")
+                    await asyncio.sleep(5.0)
 
                     # Call Crowstack Export File API right after account creation
                     try:
@@ -2290,13 +2316,8 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                                 for k, v in exp_data.items():
                                     if k not in acc or not acc[k]:
                                         acc[k] = v
-                        else:
-                            if cid:
-                                await send_tg_message(client, cid, f"⚠️ <b>[Crowstack Response] export_file non-200:</b>\n<code>{exp_res}</code>")
                     except Exception as exp_e:
                         print(f"[Crowstack export_file error]: {exp_e}")
-                        if cid:
-                            await send_tg_message(client, cid, f"⚠️ <b>[Crowstack export_file exception]:</b> <code>{exp_e}</code>")
 
                     xo = acc.get("xo", "")
                     ox = acc.get("ox", "")
@@ -2311,13 +2332,18 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                         "is_new": True,
                     }
                 else:
-                    err = (data.get("error") or data.get("message") or raw_text) if data else raw_text
-                    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack {prof_name} verify rejected]: {err} (HTTP {resp.status_code})")
+                    last_err = (data.get("error") or data.get("message") or raw_text) if data else raw_text
+                    print(f"[{time.strftime('%H:%M:%S')}] [Crowstack {prof_name} verify rejected - Attempt #{attempt}]: {last_err} (HTTP {resp.status_code})")
             except Exception as e:
-                print(f"[{time.strftime('%H:%M:%S')}] [Crowstack {p_k} verify error]: {e}")
+                last_err = str(e)
+                print(f"[{time.strftime('%H:%M:%S')}] [Crowstack {prof_name} verify error - Attempt #{attempt}]: {e}")
 
-        print(f"[{time.strftime('%H:%M:%S')}] [Crowstack Verify] All sessions failed for +91{phone}")
-        return {"ok": False, "error": "Crowstack verify failed across all sessions.", "fail_type": "crowstack_verify"}
+            if attempt < max_verify_attempts:
+                print(f"[{time.strftime('%H:%M:%S')}] ⏳ Waiting 2s before retrying verify on same session ({prof_name}) for +91{phone}...")
+                await asyncio.sleep(2.0)
+
+        print(f"[{time.strftime('%H:%M:%S')}] [Crowstack Verify] All {max_verify_attempts} attempts failed on {prof_name} for +91{phone}: {last_err}")
+        return {"ok": False, "error": f"Crowstack verify rejected on {prof_name} ({last_err})", "fail_type": "crowstack_verify"}
 
     # Method 2: Hidenfree
     if session.get("method") == "hidenfree":
@@ -3501,7 +3527,7 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             f"🎉 <b>Session Accounts Created:</b> <b>{state.get('accounts_created', 0)}</b>\n"
             f"⚠️ <b>Session Account Creation Failed:</b> <b>{state.get('failed_creations', 0)}</b>\n"
             f"   ├── ⏰ <b>SMS Timeout (2m):</b> <b>{state.get('failed_sms_timeout', 0)}</b>\n"
-            f"   ├── 🦅 <b>Crowstack Verify Rejected:</b> {tot_disp}{consec_str}\n"
+            f"   ├── 🦅 <b>Crowstack Verify Rejected:</b> {tot_disp}{consec_str} | Lifetime: <b>{get_global_crowstack_rejects()}</b>\n"
             f"   └── 🔄 <b>In Line for Cancel (Queue):</b> <b>{state.get('pending_cancels', 0)}</b>\n"
             f"💵 <b>Total Pool Wallet:</b> <b>₹{total_bal:.2f}</b>\n\n"
             f"{top_recommendation}"
@@ -3551,7 +3577,8 @@ async def build_stats_view_message_and_markup(client: httpx.AsyncClient, chat_id
             f"📅 <b>Today's Total:</b> <b>{today_count} Created</b> (❌ {today_failed} Failed)\n\n"
             f"🔄 <b>Last Session Attempts:</b> {state.get('attempts', 0) if state else 0}\n"
             f"🎉 <b>Last Session Created:</b> {state.get('accounts_created', 0) if state else 0}\n"
-            f"⚠️ <b>Last Session Failed:</b> {state.get('failed_creations', 0) if state else 0}\n\n"
+            f"⚠️ <b>Last Session Failed:</b> {state.get('failed_creations', 0) if state else 0}\n"
+            f"🦅 <b>Lifetime Crowstack Rejections:</b> <b>{get_global_crowstack_rejects()}</b>\n\n"
             f"{top_recommendation}"
             f"💰 <b>Key Performance & Balances:</b>\n{k_bal_str}\n"
             f"💵 <b>Total Combined Wallet:</b> <b>₹{total_bal:.2f}</b>\n"
@@ -4070,6 +4097,7 @@ async def run_single_key_worker(
             state["failed_creations"] = state.get("failed_creations", 0) + 1
             state["failed_crowstack_verify"] = state.get("failed_crowstack_verify", 0) + 1
             state["consecutive_crowstack_rejects"] = state.get("consecutive_crowstack_rejects", 0) + 1
+            tot_global = increment_global_crowstack_rejects()
 
             cfg_user = get_user_config(chat_id)
             max_tot = int(cfg_user.get("max_total_crowstack_rejects", 5))
@@ -4082,7 +4110,7 @@ async def run_single_key_worker(
             consec_tag = f"{consec}/{max_consec}" if max_consec > 0 else f"{consec} (Limit: Off)"
 
             await record_failed_account(phone, worker_id, current_server, key_preview, f"Crowstack Verify Rejected: {err_msg}")
-            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Crowstack verify failed: {err_msg} (Total: {tot_tag} | Consec: {consec_tag}). Queued cancel...")
+            print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] ❌ Crowstack verify failed: {err_msg} (Session: {tot_tag} | Consec: {consec_tag} | Lifetime Global: {tot_global}). Queued cancel...")
             cur_bal = await otpd_balance(client, api_key)
             w_state["balance"] = parse_balance_float(cur_bal)
             await record_transaction("LOGIN_FAILED_CANCEL", phone, worker_id, current_server, cur_bal, err_msg)
@@ -4098,11 +4126,12 @@ async def run_single_key_worker(
                 if not state.get("stop_flag"):
                     state["stop_flag"] = True
                     state["hunting"] = False
-                    print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] {auto_stop_reason} Stopping hunt...")
+                    print(f"[{time.strftime('%H:%M:%S')}] 🛑 [SAFETY TRIGGER] {auto_stop_reason} (Global Lifetime: {tot_global}) Stopping hunt...")
                     safety_alert = (
                         "🛑 <b>AUTOMATIC SAFETY STOP TRIGGERED!</b>\n"
                         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"⚠️ <b>{auto_stop_reason}</b>\n"
+                        f"🦅 <b>Lifetime Global Rejections:</b> <code>{tot_global}</code>\n"
                         "💸 OTP Doctor balance aur numbers waste hone se bachane ke liye bot ne hunting turant <b>STOP</b> kar di hai.\n\n"
                         "🔍 <b>Likely Reason:</b>\n"
                         "• Crowstack session expire ho gaya ya token invalid ho gaya hai\n"
@@ -4139,7 +4168,7 @@ async def run_single_key_worker(
                 f"⚠️ <b>Reason:</b> <code>{err_msg}</code>\n"
                 f"📊 <b>Worker #{worker_id}:</b> {w_state.get('accounts', 0)} Created | {w_state.get('crowstack_rejects', 0)} Crowstack Reject | {w_state.get('timeout_fails', 0)} Timeout Fail | Bal: ₹{cur_bal}\n"
                 f"📊 <b>Session Failures:</b> Total: <b>{state.get('failed_creations', 0)}</b> | ⏰ SMS Timeout: <b>{state.get('failed_sms_timeout', 0)}</b>\n"
-                f"🦅 <b>Verify Rejects:</b> Total: <b>{tot_tag}</b> | Consecutive: <b>{consec_tag}</b>\n"
+                f"🦅 <b>Verify Rejects:</b> Session: <b>{tot_tag}</b> | Consecutive: <b>{consec_tag}</b> | Lifetime Global: <b>{tot_global}</b>\n"
                 f"🔄 Number cancel & refund queued.",
             )
             await otpd_cancel(
