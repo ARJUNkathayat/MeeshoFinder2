@@ -2303,10 +2303,6 @@ async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, ses
                     acc = data.get("account", {})
                     print(f"[{time.strftime('%H:%M:%S')}] [Crowstack] ✅ Verify SUCCESS via {prof_name} for +91{phone} (Attempt #{attempt})!")
 
-                    # Wait 5 seconds before calling export_file so Crowstack backend generator syncs latest account
-                    print(f"[{time.strftime('%H:%M:%S')}] ⏳ Waiting 5s before calling export_file to ensure fresh account sync (prevents duplicate number export)...")
-                    await asyncio.sleep(5.0)
-
                     # Call Crowstack Export File API right after account creation
                     try:
                         exp_res = await crowstack_export_file(client, cid)
