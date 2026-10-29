@@ -7366,20 +7366,32 @@ async def bot_loop():
                             await send_tg_message(client, chat_id, "❌ Kripya sirf numeric Server ID bhejein (jaise: <code>5841</code>).")
 
                     # ── ⚡ Creator Engine Menu & Commands ──
-                    elif text in ("⚡ Creator Engine", "⚡ API Engine", "/engine", "/engines", "/setengine"):
-                        eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
-                        await send_tg_message(client, chat_id, eng_text, reply_markup=eng_kb)
-
-                    elif text.startswith("/setengine ") or text.startswith("/engine "):
-                        parts = text.split(maxsplit=1)
-                        if len(parts) == 2:
-                            val = parts[1].strip().lower()
-                            if val in ("apnakhudkaserver", "apna", "apnaserver", "khudka"):
+                    elif text in ("⚡ Creator Engine", "⚡ API Engine", "/engine", "/engines", "/setengine") or text.startswith("/setengine") or text.startswith("/engine") or text in ("/apnakhudkaserver", "/apna_server", "/setengine_apnakhudkaserver", "/setengine_apna_server", "👑 ApnaKhudKaServer"):
+                        if text in ("⚡ Creator Engine", "⚡ API Engine", "/engine", "/engines", "/setengine"):
+                            eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
+                            await send_tg_message(client, chat_id, eng_text, reply_markup=eng_kb)
+                        else:
+                            clean_cmd = text.replace("/setengine_", "").replace("/setengine", "").replace("/engine_", "").replace("/engine", "").strip().lower()
+                            if "apna" in clean_cmd or "khudka" in clean_cmd or text in ("/apnakhudkaserver", "/apna_server", "/setengine_apnakhudkaserver", "/setengine_apna_server", "👑 ApnaKhudKaServer"):
                                 val = "apna_server"
+                            elif "cup" in clean_cmd:
+                                val = "cupponhub"
+                            elif "crow" in clean_cmd:
+                                val = "crowstack"
+                            elif "gem" in clean_cmd:
+                                val = "gemixai"
+                            elif "hid" in clean_cmd:
+                                val = "hidenfree"
+                            elif "auto" in clean_cmd:
+                                val = "auto"
+                            else:
+                                val = clean_cmd
+
                             if val in ("cupponhub", "crowstack", "gemixai", "hidenfree", "auto", "apna_server"):
                                 update_user_config(chat_id, {"api_engine": val})
                                 eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
-                                await send_tg_message(client, chat_id, f"✅ <b>API Engine set to {val.upper()}!</b>\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                                reply_kb = ADMIN_MAIN_MENU_KEYBOARD if admin_flag else USER_MAIN_MENU_KEYBOARD
+                                await send_tg_message(client, chat_id, f"✅ <b>API Engine set to {val.upper()}!</b>\n\n{eng_text}", reply_markup=reply_kb)
                             else:
                                 await send_tg_message(client, chat_id, "⚠️ Options: <code>apna_server</code>, <code>cupponhub</code>, <code>crowstack</code>, <code>gemixai</code>, <code>hidenfree</code>, <code>auto</code>")
 
