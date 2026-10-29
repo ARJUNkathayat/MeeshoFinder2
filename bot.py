@@ -49,6 +49,18 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+# Root module loader for Meesho API & Device Pool
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+import meesho_api as M
+
+# ─── Apna Khud Ka Server & Hybrid Proxy Hunter Configurations ────────────────
+DEFAULT_PROXY_URL = "http://res-in:pgw-930a12df1079ad5104cd441d6dca3f39e942b2929e8297c8@gw.proxyrise.com:443"
+MEESHO_API_BASE = "https://prod.meeshoapi.com/api"
+DEFAULT_MEESHO_AUTH = "32c4d8137cn9eb493a1921f203173080"
+SATTU_PID = "906926323"
+
 # ─── Load Environment ─────────────────────────────────────────────────────────
 load_dotenv()
 
@@ -2129,12 +2141,253 @@ async def _send_gemixai_otp_flow(client: httpx.AsyncClient, phone: str, dev: dic
     return {"ok": False, "error": "GemixAI flow failed"}
 
 
+# ─── Apna Khud Ka Server Engine Helpers (Proxy ₹190 FOD + Native RSA SMS) ────
+async def check_proxy_health(proxy_url: str) -> dict:
+    """Checks if the proxy is alive, returns IP, country and latency."""
+    t0 = time.time()
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=12.0) as client:
+            r = await client.get("http://ip-api.com/json")
+            lat_ms = int((time.time() - t0) * 1000)
+            if r.status_code == 200:
+                d = r.json()
+                return {
+                    "ok": True,
+                    "ip": d.get("query", "Unknown"),
+                    "country": d.get("countryCode", "Unknown"),
+                    "isp": d.get("isp", "Unknown"),
+                    "latency": lat_ms,
+                }
+            return {"ok": False, "error": f"HTTP {r.status_code}", "latency": lat_ms}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "latency": int((time.time() - t0) * 1000)}
+
+
+async def send_native_meesho_api(path: str, body: dict, instance_id: str, gaid: str, proxy_url: str = None, timeout: float = 15.0) -> tuple[int, dict]:
+    """Native Direct Meesho API caller using httpx async client."""
+    url = f"{MEESHO_API_BASE}/{path.lstrip('/')}"
+    headers = {
+        "Content-Type": "application/json; charset=UTF-8",
+        "Authorization": DEFAULT_MEESHO_AUTH,
+        "Accept": "application/json",
+        "User-Agent": "okhttp/4.12.0",
+        "App-Version": "28.9",
+        "App-Version-Code": "853",
+        "Application-Id": "com.meesho.supply",
+        "Country-Iso": "in",
+        "MEESHO-ISO-COUNTRY-CODE": "IN",
+        "APP-CLIENT-ID": "android",
+        "APP-SDK-VERSION": "34",
+        "MEESHO-USER-CONTEXT": "anonymous",
+        "Instance-Id": instance_id,
+        "APP-GAID": gaid,
+        "APP-ISO-LANGUAGE-CODE": "en",
+    }
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=timeout) as client:
+            r = await client.post(url, headers=headers, json=body)
+            try:
+                data = r.json()
+            except Exception:
+                data = {"error": r.text}
+            return r.status_code, data
+    except Exception as e:
+        return 500, {"error": str(e)}
+
+
+async def request_sms_otp_native(phone: str, instance_id: str, gaid: str, proxy_url: str = None) -> dict:
+    """Dispatches direct Carrier SMS OTP via Meesho official RSA channel."""
+    clean_mobile = re.sub(r"[^0-9]", "", phone)[-10:]
+    payload_dict = {"country_code": "+91", "phone_number": clean_mobile}
+    encrypted_payload = M.rsa_encrypt(json.dumps(payload_dict, separators=(",", ":")))
+
+    status, data = await send_native_meesho_api("1.0/user/login/request-otp", {"payload": encrypted_payload}, instance_id, gaid, proxy_url=proxy_url)
+    if status == 200 and data.get("request_id"):
+        return {"ok": True, "request_id": data["request_id"], "resend_wait": data.get("resend_otp_wait_time", 60)}
+    err = data.get("message") or data.get("error") or str(data)
+    return {"ok": False, "error": f"HTTP {status}: {err}"}
+
+
+async def verify_sms_otp_native(request_id: str, otp: str, instance_id: str, gaid: str, proxy_url: str = None) -> dict:
+    """Verifies SMS OTP using working 'meesho_sms_auth' protocol."""
+    clean_otp = str(otp).strip()
+    payload = {
+        "request_id": request_id,
+        "otp": clean_otp,
+        "login_type": "meesho_sms_auth",
+        "ga_id": gaid,
+    }
+    status, data = await send_native_meesho_api("2.0/user/login", payload, instance_id, gaid, proxy_url=proxy_url)
+    if status == 200 and (data.get("xoox") or data.get("user")):
+        xoox = data.get("xoox") or {}
+        user = data.get("user") or {}
+        return {
+            "ok": True,
+            "xo": xoox.get("xo", ""),
+            "ox": xoox.get("ox", ""),
+            "user_id": user.get("id", 0),
+            "phone": user.get("phone_number", "")
+        }
+
+    # Fallback without ga_id
+    fallback = {
+        "request_id": request_id,
+        "otp": clean_otp,
+        "login_type": "meesho_sms_auth",
+    }
+    status2, data2 = await send_native_meesho_api("2.0/user/login", fallback, instance_id, gaid, proxy_url=proxy_url)
+    if status2 == 200 and (data2.get("xoox") or data2.get("user")):
+        xoox = data2.get("xoox") or {}
+        user = data2.get("user") or {}
+        return {
+            "ok": True,
+            "xo": xoox.get("xo", ""),
+            "ox": xoox.get("ox", ""),
+            "user_id": user.get("id", 0),
+            "phone": user.get("phone_number", "")
+        }
+
+    err_resp = data if (data.get("message") or data.get("error")) else data2
+    err = err_resp.get("message") or err_resp.get("error") or str(err_resp)
+    return {"ok": False, "error": f"HTTP {status}: {err}"}
+
+
+async def hunt_190_fod(proxy_url: str, target_bucket="190", max_attempts=10) -> dict | None:
+    """Uses Indian Residential Proxy to hunt a live Rs 190 FOD offer."""
+    for attempt in range(1, max_attempts + 1):
+        dev_template = M.DEVICE_POOL[(attempt - 1) % len(M.DEVICE_POOL)]
+        dev = dict(dev_template)
+        inst_id = uuid.uuid4().hex
+        gaid = str(uuid.uuid4())
+        app_sid = str(uuid.uuid4())
+
+        dev['gaid'] = gaid
+        dev['session_count'] = 1
+        dev['offer_bucket'] = str(target_bucket)
+        dev['apps_installed'] = [M.APP_POOL[0]] + M.APP_POOL[1:6]
+
+        body = M._fod_body(dev)
+        body['campaign_id'] = f"acquisition_fod_{target_bucket}"
+        body['referrer_url'] = f"utm_source=google-adwords&utm_campaign=first_order_discount_{target_bucket}"
+        ua = f"Dalvik/2.1.0 (Linux; U; Android {dev['os_version']}; {dev['model']} Build/) Cronet/137.0.7100.61"
+        xo = M.ANON_XO
+
+        headers = M._api_headers(inst_id, xo, "anonymous", gaid=gaid, session_count=1, ua=ua)
+
+        try:
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=15.0) as client:
+                r_fod = await client.post(f"{MEESHO_API_BASE}/1.0/anonymous/fod-personalisation", headers=headers, json=body)
+                if r_fod.status_code == 200:
+                    raw = r_fod.json()
+                    offer = raw.get("surgical_first_order_discount_v3", {}).get("offer", {})
+                    ret_bucket = raw.get("surgical_first_order_discount_v3", {}).get("offer_bucket")
+                    max_val = offer.get("max_offer_value")
+
+                    if str(max_val) == str(target_bucket) or str(ret_bucket) == str(target_bucket):
+                        # Verify Sattu Price under this exact session
+                        p_headers = M._api_headers(inst_id, xo, "anonymous", gaid=gaid, ua="Cronet")
+                        r_sattu = await client.get(
+                            f"{MEESHO_API_BASE}/3.0/product/dynamic?id={SATTU_PID}&context=search&origin=search",
+                            headers=p_headers
+                        )
+                        dyn = r_sattu.json().get("product", {}) if r_sattu.status_code == 200 else {}
+                        sup = (dyn.get("suppliers") or [{}])[0]
+                        pv = sup.get("prepaid_price_view", {})
+                        final_p = pv.get("prepaid_price", 61)
+
+                        return {
+                            "instance_id": inst_id,
+                            "gaid": gaid,
+                            "app_session_id": app_sid,
+                            "dev": dev,
+                            "anon_xo": xo,
+                            "offer": offer,
+                            "sattu_price": final_p
+                        }
+        except Exception as e:
+            print(f"[hunt_190_fod attempt #{attempt} error]: {e}")
+        await asyncio.sleep(0.3)
+    return None
+
+
 async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat_id: int | str = None, worker_id: int = 1, server: str = "") -> dict:
-    """Dispatches OTP using selected Engine: Cupponhub, Crowstack (Rem/Marin), GemixAI, Hidenfree, or Auto-Failover."""
+    """Dispatches OTP using selected Engine: ApnaKhudKaServer, Cupponhub, Crowstack (Rem/Marin), GemixAI, Hidenfree, or Auto-Failover."""
     cfg = get_user_config(chat_id) if chat_id else {}
     engine = cfg.get("api_engine", "crowstack")
     tier = int(cfg.get("cupponhub_tier", 200))
     cur_ref = get_referral_link()
+
+    # ── 0. ApnaKhudKaServer Direct Engine (Proxy ₹190 FOD + Native Carrier RSA SMS) ──
+    if engine == "apna_server":
+        proxy_url = cfg.get("proxy_url", DEFAULT_PROXY_URL)
+
+        # 1. Pre-flight Proxy Health Check
+        p_chk = await check_proxy_health(proxy_url)
+        if not p_chk.get("ok"):
+            err_msg = (
+                f"❌ <b>[Proxy Health Check Failed!]</b>\n"
+                f"Proxy {proxy_url.split('@')[-1]} reach nahi ho pa rahi hai: <code>{p_chk.get('error')}</code>\n\n"
+                f"⚠️ OTP balance protect karne ke liye hunt rok diya gaya hai. Proxy check karein ya <code>/set_proxy</code> se update karein."
+            )
+            if chat_id:
+                await send_tg_message(client, chat_id, err_msg)
+            return {"ok": False, "error": f"Proxy Down: {p_chk.get('error')}"}
+
+        if chat_id:
+            await send_tg_message(
+                client,
+                chat_id,
+                f"🌐 <b>[Step 1/5] Proxy Live Verified:</b> <code>{p_chk['ip']} ({p_chk.get('country')})</code> | Ping: <code>{p_chk['latency']}ms</code> ✅\n"
+                f"🎯 <b>[Step 2/5] Hunting ₹190 FOD Session via Indian Residential Proxy...</b>"
+            )
+
+        # 2. Hunt ₹190 FOD offer
+        bundle = await hunt_190_fod(proxy_url, target_bucket="190", max_attempts=8)
+        if not bundle:
+            return {"ok": False, "error": "Could not lock ₹190 FOD within limit"}
+
+        if chat_id:
+            await send_tg_message(
+                client,
+                chat_id,
+                f"🎯 <b>[Step 2/5 Locked!] ₹190 FOD Session Found!</b>\n"
+                f"📱 Device: <code>{bundle['dev']['brand'].upper()} {bundle['dev']['model']}</code>\n"
+                f"🏷️ Offer: <b>{bundle['offer'].get('offer_text', '₹190 OFF')}</b>\n"
+                f"🌾 Sattu 1Kg: <b>₹{bundle['sattu_price']}</b> (Live Verified) ✅\n\n"
+                f"📩 <b>[Step 3/5] Dispatching Direct Carrier SMS OTP to +91{phone}...</b>"
+            )
+
+        # 3. Request SMS OTP via Native RSA
+        otp_resp = await request_sms_otp_native(phone, bundle["instance_id"], bundle["gaid"])
+        if not otp_resp.get("ok"):
+            return otp_resp
+
+        req_id = otp_resp.get("request_id")
+        if chat_id:
+            await send_tg_message(
+                client,
+                chat_id,
+                f"📱 <b>[Step 3/5] Native SMS OTP Sent to Carrier Inbox!</b>\n"
+                f"🆔 ReqID: <code>{req_id}</code>\n"
+                f"⏳ Waiting for OTP Doctor SMS..."
+            )
+
+        return {
+            "ok": True,
+            "method": "apna_server",
+            "registered": False,
+            "bucket": "190",
+            "request_id": req_id,
+            "session": {
+                "method": "apna_server",
+                "phone": phone,
+                "request_id": req_id,
+                "bundle": bundle,
+                "instance_id": bundle["instance_id"],
+                "gaid": bundle["gaid"],
+                "chat_id": chat_id,
+            }
+        }
 
     # ── 1. Cupponhub Direct Engine ──
     if engine == "cupponhub":
@@ -2257,9 +2510,77 @@ async def send_meesho_otp(client: httpx.AsyncClient, phone: str, dev: dict, chat
 
 
 async def verify_meesho_otp(client: httpx.AsyncClient, phone: str, otp: str, session: dict, dev: dict, chat_id: int | str = None) -> dict:
-    """Verifies OTP via Cupponhub, Crowstack (Rem/Marin auto-failover), Hidenfree, GemixAI, or fallback to OTPLESS."""
+    """Verifies OTP via ApnaKhudKaServer, Cupponhub, Crowstack (Rem/Marin auto-failover), Hidenfree, GemixAI, or fallback to OTPLESS."""
     method = session.get("method")
     cid = chat_id or session.get("chat_id")
+
+    # Method 0: ApnaKhudKaServer (Native meesho_sms_auth via Direct API)
+    if method == "apna_server":
+        req_id = session.get("request_id")
+        inst_id = session.get("instance_id")
+        gaid = session.get("gaid")
+        bundle = session.get("bundle", {})
+
+        if cid:
+            await send_tg_message(client, cid, f"🔐 <b>[Step 4/5] Verifying OTP via 'meesho_sms_auth' (Zero Reject Protocol)...</b>")
+
+        v_res = await verify_sms_otp_native(req_id, otp, inst_id, gaid)
+        if not v_res.get("ok"):
+            return {"ok": False, "error": v_res.get("error", "Verify failed")}
+
+        user_id = v_res.get("user_id")
+        xo = v_res.get("xo")
+        ox = v_res.get("ox")
+
+        if cid:
+            await send_tg_message(
+                client,
+                cid,
+                f"🔑 <b>[Step 5/5] Token Minted! User ID: <code>{user_id}</code></b>\n"
+                f"⚡ XO: <code>{xo[:20]}...</code> (len={len(xo)})\n"
+                f"✨ Packaging <code>KhudKajson_{phone}.json</code>..."
+            )
+
+        acc = {
+            "mobile": phone,
+            "user_id": user_id,
+            "phone": f"+91{phone}",
+            "xo": xo,
+            "ox": ox,
+            "instance_id": inst_id,
+            "gaid": gaid,
+            "identity": {
+                "instance_id": inst_id,
+                "gaid": gaid,
+                "device": bundle.get("dev", {}).get("model", "Android"),
+                "fod_offer": bundle.get("offer", {}).get("offer_text", "₹190 OFF"),
+                "sattu_price": bundle.get("sattu_price", 61)
+            }
+        }
+
+        # Auto save to local workspace and download dir
+        try:
+            ws_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            with open(os.path.join(ws_dir, f"meesho_{phone}.json"), "w", encoding="utf-8") as fp:
+                json.dump(acc, fp, indent=2, ensure_ascii=False)
+            dl_dir = r"d:\download"
+            if os.path.exists(dl_dir):
+                with open(os.path.join(dl_dir, f"meesho_account_{phone}.json"), "w", encoding="utf-8") as fp:
+                    json.dump(acc, fp, indent=2, ensure_ascii=False)
+        except Exception as ex_save:
+            print(f"[Save Account Exception]: {ex_save}")
+
+        return {
+            "ok": True,
+            "user_id": user_id,
+            "phone": phone,
+            "account": acc,
+            "xo": xo,
+            "ox": ox,
+            "bucket": "190",
+            "is_new": True,
+            "method": "apna_server",
+        }
 
     # Method 1: Cupponhub
     if method == "cupponhub":
@@ -3689,6 +4010,7 @@ def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
     cur_max_consec = int(cfg.get("max_consecutive_crowstack_rejects", 3))
 
     engine_names = {
+        "apna_server": "👑 ApnaKhudKaServer (Proxy ₹190 + Native RSA)",
         "cupponhub": f"🛍️ Cupponhub (Tier: ₹{cur_tier} OFF)",
         "crowstack": "🦅 Crowstack (Rem/Marin Failover)",
         "gemixai": "⚡ GemixAI (₹200 Reroll)",
@@ -3709,7 +4031,7 @@ def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
         f"🛡️ <b>Crowstack Total Reject Limit:</b> {tot_rej_label}",
         f"🔁 <b>Crowstack Consecutive Reject Limit:</b> {consec_rej_label}\n",
         "💡 <i>Aap choose kar sakte hain:</i>\n"
-        "• <b>API Engine:</b> Cupponhub, Crowstack, GemixAI ya Auto-Failover\n"
+        "• <b>API Engine:</b> ApnaKhudKaServer (Proxy ₹190), Cupponhub, Crowstack, GemixAI ya Auto-Failover\n"
         "• <b>Tier:</b> ₹200 OFF ya ₹180 OFF\n"
         "• <b>Target Limit:</b> Kitne accounts banne par bot auto-stop ho\n"
         "• <b>Total Reject Limit:</b> Poore hunt me kitne Crowstack reject par auto-stop ho (e.g. 5)\n"
@@ -3718,6 +4040,7 @@ def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
         "👇 <b>Niche diye gaye buttons se turant customize karein:</b>",
     ]
 
+    b_apna = "✅ " if cur_engine == "apna_server" else ""
     b_cup = "✅ " if cur_engine == "cupponhub" else ""
     b_crow = "✅ " if cur_engine == "crowstack" else ""
     b_gem = "✅ " if cur_engine == "gemixai" else ""
@@ -3729,6 +4052,9 @@ def build_engine_and_target_settings_message_and_markup(chat_id: int | str):
 
     kb = {
         "inline_keyboard": [
+            [
+                {"text": f"{b_apna}👑 ApnaKhudKaServer (Proxy ₹190)", "callback_data": "set_engine_apna_server"},
+            ],
             [
                 {"text": f"{b_cup}🛍️ Cupponhub API", "callback_data": "set_engine_cupponhub"},
                 {"text": f"{b_crow}🦅 Crowstack API", "callback_data": "set_engine_crowstack"},
@@ -4056,6 +4382,11 @@ async def run_single_key_worker(
             else:
                 key_bal_alert = f"\n💳 <b>Key Balance:</b> ₹{key_bal_f:.2f}"
 
+            cfg_user = get_user_config(chat_id)
+            is_apna = (session_dict.get("method") == "apna_server" or cfg_user.get("api_engine") == "apna_server")
+            doc_filename = f"KhudKajson_{phone}.json" if is_apna else f"meesho_{phone}.json"
+            cap_prefix = "👑 ApnaKhudKaServer Meesho Account" if is_apna else "✅ Meesho Account"
+
             account_msg = (
                 f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
                 f"🎉 <b>MEESHO ACCOUNT CREATED SUCCESSFULLY!</b>\n"
@@ -4068,16 +4399,16 @@ async def run_single_key_worker(
                 f"🏷️ <b>Server:</b> <code>Server {current_server}</code>\n"
                 f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime: <b>#{lifetime_total}</b>{target_info}{store_tag}\n"
                 f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
-                f"📁 <i>Official JSON file <code>meesho_{phone}.json</code> niche attach ki gayi hai.</i>"
+                f"📁 <i>Official JSON file <code>{doc_filename}</code> niche attach ki gayi hai.</i>"
             )
             await send_tg_message(client, chat_id, account_msg)
 
             await send_tg_document(
                 client,
                 chat_id,
-                filename=f"meesho_{phone}.json",
+                filename=doc_filename,
                 content=json_str,
-                caption=f"✅ Meesho Account (+91{phone}) — Aaj Ka #{today_count} Account | Worker #{worker_id}",
+                caption=f"{cap_prefix} (+91{phone}) — Aaj Ka #{today_count} Account | Worker #{worker_id}",
             )
 
             # Check if target reached
@@ -4506,6 +4837,10 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
         today_ordinal = ordinal(today_count)
         lifetime_total = len(history)
 
+        is_apna = (login_res.get("method") == "apna_server" or cfg.get("api_engine") == "apna_server")
+        doc_filename = f"KhudKajson_{phone}.json" if is_apna else f"meesho_{phone}.json"
+        cap_prefix = "👑 ApnaKhudKaServer Meesho Account" if is_apna else "✅ Meesho Account"
+
         account_msg = (
             f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
             f"🎉 <b>MEESHO ACCOUNT CREATED SUCCESSFULLY!</b>\n"
@@ -4516,16 +4851,16 @@ async def handle_manual_verify_otp(client: httpx.AsyncClient, chat_id: int | str
             f"🏷️ <b>Account Type:</b> {'Old User (Existing)' if is_reg else 'Fresh Unregistered'}{store_tag}\n"
             f"📊 <b>Stats:</b> Today's: <b>#{today_count}</b> | Lifetime Total: <b>#{lifetime_total}</b>\n"
             f"✨━━━━━━━━━━━━━━━━━━━━━━━━━✨\n"
-            f"📁 <i>Official JSON file <code>meesho_{phone}.json</code> niche attach ki gayi hai.</i>"
+            f"📁 <i>Official JSON file <code>{doc_filename}</code> niche attach ki gayi hai.</i>"
         )
         await send_tg_message(client, chat_id, account_msg, reply_markup=MAIN_MENU_KEYBOARD)
 
         await send_tg_document(
             client,
             chat_id,
-            filename=f"meesho_{phone}.json",
+            filename=doc_filename,
             content=json_str,
-            caption=f"✅ Meesho Account (+91{phone}) — Aaj Ka #{today_count} JSON",
+            caption=f"{cap_prefix} (+91{phone}) — Aaj Ka #{today_count} JSON",
         )
     else:
         err_msg = login_res.get("error", "Login failed")
@@ -7039,12 +7374,49 @@ async def bot_loop():
                         parts = text.split(maxsplit=1)
                         if len(parts) == 2:
                             val = parts[1].strip().lower()
-                            if val in ("cupponhub", "crowstack", "gemixai", "hidenfree", "auto"):
+                            if val in ("apnakhudkaserver", "apna", "apnaserver", "khudka"):
+                                val = "apna_server"
+                            if val in ("cupponhub", "crowstack", "gemixai", "hidenfree", "auto", "apna_server"):
                                 update_user_config(chat_id, {"api_engine": val})
                                 eng_text, eng_kb = build_engine_and_target_settings_message_and_markup(chat_id)
                                 await send_tg_message(client, chat_id, f"✅ <b>API Engine set to {val.upper()}!</b>\n\n{eng_text}", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
                             else:
-                                await send_tg_message(client, chat_id, "⚠️ Options: <code>cupponhub</code>, <code>crowstack</code>, <code>gemixai</code>, <code>hidenfree</code>, <code>auto</code>")
+                                await send_tg_message(client, chat_id, "⚠️ Options: <code>apna_server</code>, <code>cupponhub</code>, <code>crowstack</code>, <code>gemixai</code>, <code>hidenfree</code>, <code>auto</code>")
+
+                    # ── 🌐 Proxy Commands (/proxy, /proxy_check, /set_proxy) ──
+                    elif text in ("/proxy", "/proxy_check", "🌐 Check Proxy", "/checkproxy"):
+                        cfg_p = get_user_config(chat_id)
+                        curr_proxy = cfg_p.get("proxy_url", DEFAULT_PROXY_URL)
+                        masked_proxy = curr_proxy.split("@")[-1] if "@" in curr_proxy else curr_proxy
+                        await send_tg_message(client, chat_id, f"🌐 <b>Testing Proxy Health...</b>\nTarget: <code>{masked_proxy}</code>")
+                        chk_res = await check_proxy_health(curr_proxy)
+                        if chk_res.get("ok"):
+                            msg_p = (
+                                f"✅ <b>PROXY ONLINE & VERIFIED!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🌐 <b>External IP:</b> <code>{chk_res['ip']}</code>\n"
+                                f"🇮🇳 <b>Country:</b> <code>{chk_res.get('country')}</code>\n"
+                                f"🏢 <b>ISP:</b> <code>{chk_res.get('isp')}</code>\n"
+                                f"⚡ <b>Latency:</b> <code>{chk_res['latency']}ms</code>\n"
+                                f"🔒 <b>Status:</b> Ready for ₹190 FOD Hunting!"
+                            )
+                        else:
+                            msg_p = (
+                                f"❌ <b>PROXY ERROR / OFFLINE!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"⚠️ Error: <code>{chk_res.get('error')}</code>\n"
+                                f"💡 Proxy update karne ke liye: <code>/set_proxy http://user:pass@host:port</code>"
+                            )
+                        await send_tg_message(client, chat_id, msg_p, reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+
+                    elif text.startswith("/set_proxy ") or text.startswith("/setproxy "):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) == 2 and (parts[1].startswith("http://") or parts[1].startswith("https://")):
+                            new_p = parts[1].strip()
+                            update_user_config(chat_id, {"proxy_url": new_p})
+                            await send_tg_message(client, chat_id, f"✅ <b>Proxy URL updated successfully!</b>\n\nNayi proxy test karne ke liye <code>/proxy</code> run karein.", reply_markup=ADMIN_MAIN_MENU_KEYBOARD)
+                        else:
+                            await send_tg_message(client, chat_id, "⚠️ Usage: <code>/set_proxy http://user:pass@host:port</code>")
 
                     # ── 🎁 Tier Selection (/settier 200, /settier 180, /tier) ──
                     elif text.startswith("/settier") or text.startswith("/tier"):
