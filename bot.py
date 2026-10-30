@@ -123,90 +123,6 @@ SPEEDZ_LAST_USED = {}  # {api_key: timestamp}
 SPEEDZ_LOCK = asyncio.Lock()
 SAVED_SPEEDZ_KEYS_FILE = "saved_speedz_keys.json"
 
-# ─── Crowstack Single-Slot Concurrency Gate (Zero Overwrite & Collision Shield) ─
-CROWSTACK_GATE_LOCK = asyncio.Lock()
-CROWSTACK_ACTIVE_SESSION_INFO = {
-    "active": False,
-    "phone": None,
-    "worker_id": None,
-    "locked_at": 0.0,
-}
-
-
-async def acquire_crowstack_slot(client: httpx.AsyncClient, chat_id: int | str, worker_id: int, phone: str, max_wait_sec: float = 120.0) -> bool:
-    """
-    Ensures ONLY ONE number interacts with Crowstack at any time.
-    If another number is in-flight (OTP sent & awaiting verification),
-    this worker patiently waits in queue to prevent state overwrite and verify rejects.
-    """
-    t_start = time.time()
-    notified_busy = False
-
-    while (time.time() - t_start) < max_wait_sec:
-        # Check if an existing lock has expired (stale lock timeout = 120s)
-        if CROWSTACK_ACTIVE_SESSION_INFO["active"]:
-            elapsed_hold = time.time() - CROWSTACK_ACTIVE_SESSION_INFO.get("locked_at", 0.0)
-            if elapsed_hold > 120.0:
-                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ [Crowstack Gate] Lock held for {elapsed_hold:.1f}s by {CROWSTACK_ACTIVE_SESSION_INFO.get('phone')}. Auto-releasing stale slot.")
-                CROWSTACK_ACTIVE_SESSION_INFO["active"] = False
-                CROWSTACK_ACTIVE_SESSION_INFO["phone"] = None
-                CROWSTACK_ACTIVE_SESSION_INFO["worker_id"] = None
-
-        if not CROWSTACK_ACTIVE_SESSION_INFO["active"]:
-            # Slot is free! Acquire it.
-            CROWSTACK_ACTIVE_SESSION_INFO["active"] = True
-            CROWSTACK_ACTIVE_SESSION_INFO["phone"] = phone
-            CROWSTACK_ACTIVE_SESSION_INFO["worker_id"] = worker_id
-            CROWSTACK_ACTIVE_SESSION_INFO["locked_at"] = time.time()
-
-            if notified_busy and chat_id:
-                await send_tg_message(
-                    client,
-                    chat_id,
-                    f"🟢 <b>[Worker #{worker_id} Gate Open!]</b>\n"
-                    f"Crowstack slot free mil gaya! Ab <code>+91{phone}</code> ka OTP dispatch kiya jaa raha hai..."
-                )
-            print(f"[{time.strftime('%H:%M:%S')}] 🔒 [Crowstack Gate] Acquired slot for Worker #{worker_id} (+91{phone})")
-            return True
-
-        # Slot is busy
-        if not notified_busy:
-            busy_phone = CROWSTACK_ACTIVE_SESSION_INFO.get("phone", "another phone")
-            busy_worker = CROWSTACK_ACTIVE_SESSION_INFO.get("worker_id", "?")
-            print(f"[{time.strftime('%H:%M:%S')}] ⏳ [Crowstack Gate Busy] Worker #{worker_id} (+91{phone}) waiting for Worker #{busy_worker} (+91{busy_phone})...")
-            if chat_id:
-                await send_tg_message(
-                    client,
-                    chat_id,
-                    f"⏳ <b>[Worker #{worker_id} Traffic Gate Hold]</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📱 <b>Fresh Number:</b> <code>+91{phone}</code>\n"
-                    f"🛡️ <b>Reason:</b> Crowstack par abhi <code>Worker #{busy_worker}</code> (+91{busy_phone}) ka login verification chal raha hai.\n"
-                    f"💡 <i>Verify Reject / Collision se bachne ke liye <b>Worker #{worker_id} queue me wait kar raha hai</b>...</i>"
-                )
-            notified_busy = True
-
-        await asyncio.sleep(2.0)
-
-    # If wait timed out, still proceed as fallback
-    CROWSTACK_ACTIVE_SESSION_INFO["active"] = True
-    CROWSTACK_ACTIVE_SESSION_INFO["phone"] = phone
-    CROWSTACK_ACTIVE_SESSION_INFO["worker_id"] = worker_id
-    CROWSTACK_ACTIVE_SESSION_INFO["locked_at"] = time.time()
-    return True
-
-
-def release_crowstack_slot(worker_id: int, phone: str = None):
-    """Releases the Crowstack concurrency slot so waiting workers can proceed."""
-    if CROWSTACK_ACTIVE_SESSION_INFO["active"]:
-        curr_p = CROWSTACK_ACTIVE_SESSION_INFO.get("phone")
-        if not phone or curr_p == phone:
-            print(f"[{time.strftime('%H:%M:%S')}] 🔓 [Crowstack Gate] Released slot by Worker #{worker_id} (+91{curr_p})")
-            CROWSTACK_ACTIVE_SESSION_INFO["active"] = False
-            CROWSTACK_ACTIVE_SESSION_INFO["phone"] = None
-            CROWSTACK_ACTIVE_SESSION_INFO["worker_id"] = None
-            CROWSTACK_ACTIVE_SESSION_INFO["locked_at"] = 0.0
-
 
 def load_saved_speedz_keys_global() -> list[str]:
     keys = []
@@ -4315,22 +4231,9 @@ async def run_single_key_worker(
         )
         await send_tg_message(client, chat_id, fresh_alert_msg)
 
-        # ── Crowstack Concurrency Traffic Gate ──
-        # Check if active engine is Crowstack/Auto. If yes, acquire slot before calling send-otp
-        # to guarantee zero state overwrite and eliminate simultaneous verification collision!
-        cfg_curr = get_user_config(chat_id)
-        cur_eng = cfg_curr.get("api_engine", "crowstack")
-        crowstack_gate_acquired = False
-
-        if cur_eng in ("crowstack", "auto"):
-            await acquire_crowstack_slot(client, chat_id, worker_id, phone, max_wait_sec=120.0)
-            crowstack_gate_acquired = True
-
         dev = mk_device()
         otp_res = await send_meesho_otp(client, phone, dev, chat_id=chat_id, worker_id=worker_id, server=current_server)
         if not otp_res.get("ok"):
-            if crowstack_gate_acquired:
-                release_crowstack_slot(worker_id, phone)
             err_str = otp_res.get("error", "Failed")
             w_state["failed"] = w_state.get("failed", 0) + 1
             state["failed_creations"] = state.get("failed_creations", 0) + 1
@@ -4391,8 +4294,6 @@ async def run_single_key_worker(
             await asyncio.sleep(0.3)
 
         if not otp_code:
-            if crowstack_gate_acquired:
-                release_crowstack_slot(worker_id, phone)
             w_state["failed"] = w_state.get("failed", 0) + 1
             w_state["timeout_fails"] = w_state.get("timeout_fails", 0) + 1
             state["failed_creations"] = state.get("failed_creations", 0) + 1
@@ -4424,11 +4325,7 @@ async def run_single_key_worker(
 
         # Verify OTP & Login to Meesho (Complete in-flight account even if target reached)
         print(f"[{time.strftime('%H:%M:%S')}] [Worker #{worker_id}] 🔐 Verifying OTP {otp_code} for {phone}...")
-        try:
-            login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev, chat_id=chat_id)
-        finally:
-            if crowstack_gate_acquired:
-                release_crowstack_slot(worker_id, phone)
+        login_res = await verify_meesho_otp(client, phone, otp_code, session_dict, dev, chat_id=chat_id)
 
         if login_res.get("ok"):
             # Reset consecutive Crowstack reject counter on successful account creation
